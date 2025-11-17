@@ -119,6 +119,20 @@ export class TelegramNotifier {
     return `${hours}:${minutes}:${seconds} ${day}.${month}.${year}`;
   }
 
+  /**
+   * Отправить произвольное сообщение в Telegram (без дедупликации)
+   */
+  async sendMessage(message: string): Promise<void> {
+    try {
+      await this.bot.telegram.sendMessage(config.telegramChatId, message, {
+        parse_mode: 'HTML',
+      });
+      console.log('[Telegram] Message sent');
+    } catch (error: any) {
+      console.error('[Telegram] Failed to send message:', error);
+    }
+  }
+
   cleanup(): void {
     const oneHourAgo = Date.now() - 3600000;
     for (const [key, timestamp] of this.lastAlerts.entries()) {
