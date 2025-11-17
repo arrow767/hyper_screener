@@ -1,5 +1,12 @@
 import { OrderBookMonitor } from './orderbook-monitor';
 import { config, validateConfig } from './config';
+import { BounceTradingModule } from './trading/bounceTradingModule';
+import { PaperExecutionEngine } from './trading/paperExecutionEngine';
+import { HyperliquidExecutionEngine } from './trading/hyperliquidExecutionEngine';
+import { BinanceExecutionEngine } from './trading/binanceExecutionEngine';
+import { ExecutionEngine } from './trading/interfaces';
+import { NatrService } from './indicators/natr';
+import { BinanceCandleFeed } from './data/binanceCandleFeed';
 
 async function main() {
   console.log('='.repeat(60));
@@ -15,7 +22,41 @@ async function main() {
     process.exit(1);
   }
 
-  const monitor = new OrderBookMonitor();
+  let tradingModule: BounceTradingModule | undefined;
+  let natrService: NatrService | undefined;
+  let candleFeed: BinanceCandleFeed | undefined;
+
+  if (config.tradeEnabled && config.tradeMode !== 'SCREEN_ONLY') {
+    natrService = new NatrService(config.tradeNatrPeriod);
+    candleFeed = new BinanceCandleFeed(natrService);
+    candleFeed.start();
+
+    let engine: ExecutionEngine | undefined;
+
+    switch (config.tradeExecutionVenue) {
+      case 'PAPER':
+        engine = new PaperExecutionEngine();
+        break;
+      case 'HYPERLIQUID':
+        engine = new HyperliquidExecutionEngine();
+        break;
+      case 'BINANCE':
+        engine = new BinanceExecutionEngine();
+        break;
+      default:
+        console.warn(
+          `[Main] Неподдерживаемое значение TRADE_EXECUTION_VENUE=${config.tradeExecutionVenue}, торговый модуль не активирован.`
+        );
+    }
+
+    if (engine) {
+      // Упрощённый sync: только логируем внешние открытые позиции
+      await engine.syncOpenPositions?.();
+      tradingModule = new BounceTradingModule(engine, natrService, candleFeed);
+    }
+  }
+
+  const monitor = new OrderBookMonitor(tradingModule);
 
   process.on('SIGINT', () => {
     console.log('\n[Main] Received SIGINT, shutting down gracefully...');

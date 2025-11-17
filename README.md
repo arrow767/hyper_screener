@@ -53,6 +53,30 @@ MAX_DISTANCE_PERCENT=0.2
 
 ALERT_COOLDOWN_MS=60000
 LOG_LEVEL=info
+
+# Trading module (пока только конфиг, без реальной торговли)
+TRADE_ENABLED=false
+TRADE_MODE=SCREEN_ONLY
+
+TRADE_POSITION_SIZE_USD=0
+TRADE_MAX_RISK_PER_TRADE=0
+TRADE_MAX_OPEN_POSITIONS=1
+
+TRADE_NATR_PERIOD=14
+TRADE_NATR_TIMEFRAME=5m
+TRADE_ENTRY_NATR_RANGE=[1,2]
+
+TRADE_TP_NATR_LEVELS=2,3
+TRADE_TP_PERCENTS=50,50
+
+TRADE_SL_TICK_OFFSET=1
+TRADE_DAILY_MAX_LOSS=0
+TRADE_DAILY_MAX_TRADES=0
+TRADE_EXECUTION_VENUE=PAPER
+
+BINANCE_API_KEY=your_binance_api_key_here
+BINANCE_API_SECRET=your_binance_api_secret_here
+BINANCE_FUTURES_BASE_URL=https://fapi.binance.com
 ```
 
 **Параметры:**
@@ -66,6 +90,20 @@ LOG_LEVEL=info
 | `MAX_DISTANCE_PERCENT` | Максимальное расстояние от текущей цены в % | `0.2` (0.2%) |
 | `ALERT_COOLDOWN_MS` | Задержка между повторными алертами для одной заявки в мс | `60000` (1 мин) |
 | `LOG_LEVEL` | Уровень логирования (`info` или `debug`) | `info` |
+| `TRADE_ENABLED` | Включить торговый модуль (по умолчанию `false`, в текущей версии только подготовка) | `false` |
+| `TRADE_MODE` | Режим работы: `SCREEN_ONLY` / `TRADE_PAPER` / `TRADE_LIVE` | `SCREEN_ONLY` |
+| `TRADE_POSITION_SIZE_USD` | Базовый размер позиции в USD | `1000` |
+| `TRADE_MAX_RISK_PER_TRADE` | Максимальный риск на сделку (USD или % депо, TBD в следующих спринтах) | `50` |
+| `TRADE_MAX_OPEN_POSITIONS` | Максимальное число одновременных позиций | `3` |
+| `TRADE_NATR_PERIOD` | Период NATR для 5m свечей | `14` |
+| `TRADE_NATR_TIMEFRAME` | Таймфрейм для NATR | `5m` |
+| `TRADE_ENTRY_NATR_RANGE` | Диапазон входа в NATR, формат `[min,max]` | `[1,2]` |
+| `TRADE_TP_NATR_LEVELS` | Уровни тейк-профита в NATR (через запятую) | `2,3` |
+| `TRADE_TP_PERCENTS` | Проценты позиции по уровням TP (через запятую) | `50,50` |
+| `TRADE_SL_TICK_OFFSET` | Сдвиг SL в тиках за крупной заявкой | `1` |
+| `TRADE_DAILY_MAX_LOSS` | Максимальный дневной убыток (USD), после которого торговля отключается | `0` (отключено) |
+| `TRADE_DAILY_MAX_TRADES` | Максимальное количество сделок в день | `0` (отключено) |
+| `TRADE_EXECUTION_VENUE` | Где исполнять ордера: `PAPER`, `HYPERLIQUID`, `BINANCE` (для `BINANCE` реализован вызов FAPI, для `HYPERLIQUID` пока заглушка) | `PAPER` |
 
 ### Getting Telegram Chat ID
 
@@ -208,6 +246,40 @@ MIN_ORDER_SIZE_USD_OVERRIDES=BTC:5000000,ETH:3000000,SOL:1000000
 - `60000` - не более 1 алерта в минуту для одной заявки
 - `300000` - не более 1 алерта в 5 минут
 - `0` - все алерты без ограничений (не рекомендуется)
+
+## Trading config (Спринт 1 — только архитектура и конфиг)
+
+> **Важно:** на текущем этапе торговый модуль **не реализован**, добавлены только настройки и типы. При `TRADE_ENABLED=false` и `TRADE_MODE=SCREEN_ONLY` бот работает как чистый скринер (как и раньше).
+
+### TRADE_ENABLED и TRADE_MODE
+
+- `TRADE_ENABLED=false` — глобальный флаг, который в будущем позволит включить торговый модуль.
+- `TRADE_MODE`:
+  - `SCREEN_ONLY` — только алерты, без торговли (текущая модель).
+  - `TRADE_PAPER` — планируемый paper/dry-run режим (эмуляция сделок).
+  - `TRADE_LIVE` — планируемый боевой режим с реальными ордерами.
+
+На данном спринте *любые* значения этих переменных не включают реальную торговлю — это подготовка архитектуры.
+
+### Параметры объёма и риска
+
+- `TRADE_POSITION_SIZE_USD` — базовый размер позиции в USD (в дальнейшем: `contracts = USD / price`).
+- `TRADE_MAX_RISK_PER_TRADE` — максимальный риск на сделку (детальная интерпретация будет зафиксирована в спринтах 3–4).
+- `TRADE_MAX_OPEN_POSITIONS` — ограничение по числу одновременных позиций.
+
+### Параметры NATR и уровней входа/выхода
+
+- `TRADE_NATR_PERIOD` — период NATR (по умолчанию 14).
+- `TRADE_NATR_TIMEFRAME` — таймфрейм для NATR (по умолчанию `5m`).
+- `TRADE_ENTRY_NATR_RANGE` — диапазон входа в NATR, например `[1,2]` → искать точки входа в пределах 1–2 NATR от цены.
+- `TRADE_TP_NATR_LEVELS` и `TRADE_TP_PERCENTS`:
+  - пример: `TRADE_TP_NATR_LEVELS=2,3`, `TRADE_TP_PERCENTS=50,50` → 50% позиции на 2*NATR, 50% на 3*NATR.
+
+### Stop-loss и дневные лимиты
+
+- `TRADE_SL_TICK_OFFSET` — сколько тиков за крупной заявкой ставить SL.
+- `TRADE_DAILY_MAX_LOSS` — дневной лимит убытка (USD), после достижения которого торговля должна отключаться.
+- `TRADE_DAILY_MAX_TRADES` — лимит числа сделок в день.
 
 ## Troubleshooting
 

@@ -2,6 +2,7 @@ import { OrderBookSnapshot, LargeOrder } from './types';
 import { config } from './config';
 import { HyperliquidClient } from './hyperliquid';
 import { TelegramNotifier } from './telegram';
+import { BounceTradingModule } from './trading/bounceTradingModule';
 import fetch from 'node-fetch';
 
 interface MarkPrice {
@@ -13,10 +14,12 @@ export class OrderBookMonitor {
   private telegram: TelegramNotifier;
   private markPrices: MarkPrice = {};
   private priceUpdateInterval: NodeJS.Timeout | null = null;
+  private tradingModule?: BounceTradingModule;
 
-  constructor() {
+  constructor(tradingModule?: BounceTradingModule) {
     this.hyperliquid = new HyperliquidClient();
     this.telegram = new TelegramNotifier();
+    this.tradingModule = tradingModule;
   }
 
   async start(): Promise<void> {
@@ -101,6 +104,10 @@ export class OrderBookMonitor {
       if (!parsed) continue;
       this.checkOrder(snapshot.coin, 'ask', parsed.price, parsed.size, markPrice);
     }
+
+    if (this.tradingModule && config.tradeEnabled && config.tradeMode !== 'SCREEN_ONLY') {
+      this.tradingModule.onOrderBookSnapshot?.(snapshot);
+    }
   }
 
   private extractPriceSize(level: any): { price: number; size: number } | null {
@@ -172,6 +179,12 @@ export class OrderBookMonitor {
     }
 
     this.telegram.sendAlert(largeOrder);
+
+    if (this.tradingModule && config.tradeEnabled && config.tradeMode !== 'SCREEN_ONLY') {
+      this.tradingModule
+        .onLargeOrder(largeOrder)
+        .catch((error) => console.error('[Trading] Failed to handle large order signal:', error));
+    }
   }
 
   stop(): void {
