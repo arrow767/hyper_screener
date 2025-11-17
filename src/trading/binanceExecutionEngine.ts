@@ -140,6 +140,44 @@ export class BinanceExecutionEngine implements ExecutionEngine {
   }
 
   /**
+   * Нормализация цены по правилам биржи (tickSize из PRICE_FILTER).
+   * @param symbol - символ инструмента (например, BTCUSDT)
+   * @param priceRaw - исходная цена
+   * @returns Округлённая цена с правильной точностью
+   */
+  private async normalizePrice(symbol: string, priceRaw: number): Promise<number> {
+    await this.ensureExchangeInfo();
+    
+    if (!this.exchangeInfoCache) {
+      return Number(priceRaw.toFixed(2));
+    }
+
+    const info = this.exchangeInfoCache.symbols?.find((s: any) => s.symbol === symbol);
+    if (!info) {
+      return Number(priceRaw.toFixed(2));
+    }
+
+    const priceFilter = info.filters?.find((f: any) => f.filterType === 'PRICE_FILTER');
+    if (!priceFilter) {
+      return Number(priceRaw.toFixed(2));
+    }
+
+    const tickSize = parseFloat(priceFilter.tickSize);
+    if (!isFinite(tickSize) || tickSize <= 0) {
+      return Number(priceRaw.toFixed(2));
+    }
+
+    // Округляем к ближайшему шагу (tickSize)
+    const price = Math.round(priceRaw / tickSize) * tickSize;
+    
+    // Определяем количество знаков после запятой для tickSize
+    const tickStr = tickSize.toString();
+    const decimals = tickStr.includes('.') ? tickStr.split('.')[1].length : 0;
+    
+    return Number(price.toFixed(decimals));
+  }
+
+  /**
    * Конвертация монеты в Binance futures symbol.
    * Пример: BTC -> BTCUSDT.
    */
@@ -283,8 +321,11 @@ export class BinanceExecutionEngine implements ExecutionEngine {
       return null;
     }
 
+    // Нормализуем цену по правилам биржи
+    const normalizedPrice = await this.normalizePrice(symbol, price);
+
     console.log(
-      `[BinanceExecution] Sending LIMIT order: ${binanceSide} ${symbol} qty=${quantity} @ $${price.toFixed(4)} (purpose=${purpose})`
+      `[BinanceExecution] Sending LIMIT order: ${binanceSide} ${symbol} qty=${quantity} @ $${normalizedPrice.toFixed(4)} (purpose=${purpose})`
     );
 
     try {
@@ -293,7 +334,7 @@ export class BinanceExecutionEngine implements ExecutionEngine {
         side: binanceSide,
         type: 'LIMIT',
         quantity,
-        price: price.toFixed(8),
+        price: normalizedPrice,
         timeInForce: 'GTC',
       };
 
@@ -307,7 +348,7 @@ export class BinanceExecutionEngine implements ExecutionEngine {
       const order: LimitOrderState = {
         orderId: `binance-${resp.orderId}`,
         coin,
-        price,
+        price: normalizedPrice,
         sizeUsd,
         side,
         purpose,
@@ -318,7 +359,7 @@ export class BinanceExecutionEngine implements ExecutionEngine {
 
       console.log(
         `[BinanceExecution] Лимитный ордер размещён: ${side.toUpperCase()} ${coin} ` +
-          `sizeUsd=${sizeUsd.toFixed(2)} @ $${price.toFixed(4)} (orderId=${resp.orderId})`
+          `sizeUsd=${sizeUsd.toFixed(2)} @ $${normalizedPrice.toFixed(4)} (orderId=${resp.orderId})`
       );
 
       return order;
