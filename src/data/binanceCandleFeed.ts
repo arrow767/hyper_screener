@@ -20,11 +20,24 @@ export class BinanceCandleFeed {
   }
 
   trackCoin(coin: string): void {
-    this.trackedCoins.add(coin.toUpperCase());
+    const coinUpper = coin.toUpperCase();
+    if (!this.trackedCoins.has(coinUpper)) {
+      this.trackedCoins.add(coinUpper);
+      // Сразу загружаем историю свечей для новой монеты
+      this.fetchInitialCandles(coinUpper).catch((err) => {
+        console.error(`[BinanceCandleFeed] Failed to fetch initial candles for ${coinUpper}:`, err);
+      });
+    }
   }
 
   start(): void {
     if (this.timer) return;
+    
+    // Первый тик сразу при старте
+    this.tick().catch((err) => {
+      console.error('[BinanceCandleFeed] Initial tick error:', err);
+    });
+    
     // 20 секунд — достаточно редко, чтобы не упереться в лимиты, но достаточно часто для NATR
     this.timer = setInterval(() => {
       this.tick().catch((err) => {
@@ -52,6 +65,53 @@ export class BinanceCandleFeed {
           console.error(`[BinanceCandleFeed] Failed to fetch candle for ${coin}:`, error);
         }
       }
+    }
+  }
+
+  /**
+   * Загрузка истории свечей для нового инструмента (для быстрого прогрева NATR).
+   * Загружаем 50 свечей за раз, чтобы NATR(14) сразу стал доступен.
+   */
+  private async fetchInitialCandles(coin: string): Promise<void> {
+    const symbol = `${coin.toUpperCase()}USDT`;
+    const limit = 50; // С запасом для NATR(14)
+    const url = `${this.baseUrl}/fapi/v1/klines?symbol=${symbol}&interval=5m&limit=${limit}`;
+
+    try {
+      const res = await fetch(url);
+      if (!res.ok) {
+        throw new Error(`HTTP ${res.status} ${res.statusText}`);
+      }
+
+      const data = (await res.json()) as any[];
+      if (!Array.isArray(data) || !data.length) return;
+
+      let lastNatr: number | null = null;
+      
+      // Скармливаем все свечи в NatrService
+      for (const k of data) {
+        const candle: Candle = {
+          timestamp: Number(k[0]),
+          open: parseFloat(k[1]),
+          high: parseFloat(k[2]),
+          low: parseFloat(k[3]),
+          close: parseFloat(k[4]),
+        };
+        lastNatr = this.natrService.update(coin, candle);
+      }
+
+      if (lastNatr != null) {
+        console.log(
+          `[BinanceCandleFeed] Загружено ${data.length} свечей для ${coin}, ` +
+          `NATR(${config.tradeNatrPeriod}) = ${lastNatr.toFixed(4)} (${(lastNatr * 100).toFixed(2)}%)`
+        );
+      } else {
+        console.log(
+          `[BinanceCandleFeed] Загружено ${data.length} свечей для ${coin}, NATR еще не доступен`
+        );
+      }
+    } catch (error) {
+      console.error(`[BinanceCandleFeed] Failed to fetch initial candles for ${coin}:`, error);
     }
   }
 
