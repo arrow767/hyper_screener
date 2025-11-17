@@ -57,6 +57,11 @@ async function main() {
   }
 
   const monitor = new OrderBookMonitor(tradingModule);
+  
+  // Передаём hyperliquid клиент в trading module для подписки на trades
+  if (tradingModule) {
+    (tradingModule as any).hyperliquid = monitor.getHyperliquidClient();
+  }
 
   process.on('SIGINT', () => {
     console.log('\n[Main] Received SIGINT, shutting down gracefully...');

@@ -43,6 +43,23 @@ export interface TradingContext {
 }
 
 /**
+ * Информация об активном лимитном ордере (на вход или на выход).
+ */
+export interface LimitOrderState {
+  orderId: string;
+  coin: string;
+  price: number;
+  sizeUsd: number;
+  side: 'buy' | 'sell';
+  purpose: 'entry' | 'tp';
+  placedAt: number;
+  filled?: boolean;
+  filledAt?: number;
+  cancelled?: boolean;
+  cancelledAt?: number;
+}
+
+/**
  * Базовое описание открытой позиции для торгового модуля.
  */
 export interface PositionState {
@@ -76,6 +93,22 @@ export interface PositionState {
     sizeUsd: number;
     hit: boolean;
   }[];
+  /**
+   * Активные лимитные ордера на вход (для режима LIMIT или MIXED).
+   */
+  entryLimitOrders?: LimitOrderState[];
+  /**
+   * Активные лимитные ордера на выход (TP лимитками).
+   */
+  tpLimitOrders?: LimitOrderState[];
+  /**
+   * Размер позиции, уже заполненный через рыночные ордера (USD).
+   */
+  marketFilledSizeUsd?: number;
+  /**
+   * Размер позиции, уже заполненный через лимитные ордера (USD).
+   */
+  limitFilledSizeUsd?: number;
 }
 
 /**
@@ -106,10 +139,44 @@ export interface ExecutionEngine {
   closePosition(position: PositionState, reason: string): Promise<void>;
 
   /**
+   * Разместить лимитный ордер на вход или выход.
+   */
+  placeLimitOrder(
+    coin: string,
+    side: 'buy' | 'sell',
+    price: number,
+    sizeUsd: number,
+    purpose: 'entry' | 'tp'
+  ): Promise<LimitOrderState | null>;
+
+  /**
+   * Отменить лимитный ордер.
+   */
+  cancelLimitOrder(order: LimitOrderState): Promise<void>;
+
+  /**
+   * Получить статус лимитного ордера (заполнен ли).
+   */
+  checkLimitOrderStatus?(order: LimitOrderState): Promise<{ filled: boolean; filledSize?: number }>;
+
+  /**
    * Синхронизация открытых позиций с биржей (read-only).
    * Базовая реализация: просто логируем существующие позиции и игнорируем их.
    */
   syncOpenPositions?(): Promise<void>;
+
+  /**
+   * Получить текущие позиции с биржи с реализованным PnL.
+   * Используется для периодического мониторинга убытков.
+   */
+  getCurrentPositions?(): Promise<Array<{
+    coin: string;
+    side: 'long' | 'short';
+    entryPrice: number;
+    currentPrice: number;
+    sizeUsd: number;
+    pnlUsd: number;
+  }>>;
 }
 
 /**
@@ -133,7 +200,7 @@ export interface TradingModule {
    * Обработка снэпшота стакана (для отслеживания разъедания/снятия плотностей и SL/TP).
    * Реализуется по желанию конкретным модулем.
    */
-  onOrderBookSnapshot?(snapshot: OrderBookSnapshot): Promise<void> | void;
+  onOrderBookSnapshot?(snapshot: OrderBookSnapshot): Promise<void>;
 
   /**
    * Корректное завершение работы (отмена активных задач, сохранение состояния и т.п.).

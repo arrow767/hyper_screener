@@ -1,4 +1,4 @@
-import { ExecutionEngine, PositionState, TradeSignal } from './interfaces';
+import { ExecutionEngine, PositionState, TradeSignal, LimitOrderState } from './interfaces';
 
 /**
  * ВРЕМЕННО: HyperliquidExecutionEngine работает как заглушка.
@@ -22,6 +22,27 @@ export class HyperliquidExecutionEngine implements ExecutionEngine {
     console.warn(
       `[HyperliquidExecution] LIVE trading for Hyperliquid временно отключён. ` +
         `Запрос на закрытие позиции ${position.id} (${position.side.toUpperCase()} ${position.coin}, sizeUsd=${position.sizeUsd}) reason=${reason} только залогирован.`
+    );
+  }
+
+  async placeLimitOrder(
+    coin: string,
+    side: 'buy' | 'sell',
+    price: number,
+    sizeUsd: number,
+    purpose: 'entry' | 'tp'
+  ): Promise<LimitOrderState | null> {
+    console.warn(
+      `[HyperliquidExecution] LIVE trading for Hyperliquid временно отключён. ` +
+        `Запрос на размещение лимитного ордера ${side.toUpperCase()} ${coin} @ $${price.toFixed(4)} только залогирован.`
+    );
+    return null;
+  }
+
+  async cancelLimitOrder(order: LimitOrderState): Promise<void> {
+    console.warn(
+      `[HyperliquidExecution] LIVE trading for Hyperliquid временно отключён. ` +
+        `Запрос на отмену ордера ${order.orderId} только залогирован.`
     );
   }
 

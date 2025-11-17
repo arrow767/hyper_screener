@@ -1,6 +1,6 @@
 import crypto from 'crypto';
 import fetch from 'node-fetch';
-import { ExecutionEngine, PositionState, TradeSignal } from './interfaces';
+import { ExecutionEngine, PositionState, TradeSignal, LimitOrderState } from './interfaces';
 import { config } from '../config';
 
 interface BinanceOrderResponse {
@@ -47,7 +47,7 @@ export class BinanceExecutionEngine implements ExecutionEngine {
   }
 
   private async callBinance(
-    method: 'GET' | 'POST',
+    method: 'GET' | 'POST' | 'DELETE',
     path: string,
     params: Record<string, string | number>
   ): Promise<any> {
@@ -253,6 +253,133 @@ export class BinanceExecutionEngine implements ExecutionEngine {
     } catch (error) {
       console.error('[BinanceExecution] Failed to close position:', error);
     }
+  }
+
+  async placeLimitOrder(
+    coin: string,
+    side: 'buy' | 'sell',
+    price: number,
+    sizeUsd: number,
+    purpose: 'entry' | 'tp'
+  ): Promise<LimitOrderState | null> {
+    if (!this.isLive()) {
+      console.warn(
+        `[BinanceExecution] LIVE trading disabled, placeLimitOrder для ${coin} ${side} @ $${price.toFixed(4)} только залогирован.`
+      );
+      return null;
+    }
+
+    const symbol = this.toSymbol(coin);
+    const binanceSide = side === 'buy' ? 'BUY' : 'SELL';
+
+    if (!isFinite(price) || price <= 0) {
+      console.error('[BinanceExecution] Invalid price for placeLimitOrder:', price);
+      return null;
+    }
+
+    const qtyRaw = sizeUsd / price;
+    const quantity = await this.normalizeQuantity(symbol, qtyRaw);
+    if (quantity <= 0) {
+      return null;
+    }
+
+    console.log(
+      `[BinanceExecution] Sending LIMIT order: ${binanceSide} ${symbol} qty=${quantity} @ $${price.toFixed(4)} (purpose=${purpose})`
+    );
+
+    try {
+      const params: any = {
+        symbol,
+        side: binanceSide,
+        type: 'LIMIT',
+        quantity,
+        price: price.toFixed(8),
+        timeInForce: 'GTC',
+      };
+
+      // Для TP лимиток устанавливаем reduceOnly
+      if (purpose === 'tp') {
+        params.reduceOnly = 'true';
+      }
+
+      const resp = (await this.callBinance('POST', '/fapi/v1/order', params)) as BinanceOrderResponse;
+
+      const order: LimitOrderState = {
+        orderId: `binance-${resp.orderId}`,
+        coin,
+        price,
+        sizeUsd,
+        side,
+        purpose,
+        placedAt: Date.now(),
+        filled: false,
+        cancelled: false,
+      };
+
+      console.log(
+        `[BinanceExecution] Лимитный ордер размещён: ${side.toUpperCase()} ${coin} ` +
+          `sizeUsd=${sizeUsd.toFixed(2)} @ $${price.toFixed(4)} (orderId=${resp.orderId})`
+      );
+
+      return order;
+    } catch (error) {
+      console.error('[BinanceExecution] Failed to place limit order:', error);
+      return null;
+    }
+  }
+
+  async cancelLimitOrder(order: LimitOrderState): Promise<void> {
+    if (!this.isLive()) {
+      console.warn(
+        `[BinanceExecution] LIVE trading disabled, cancelLimitOrder для ${order.orderId} только залогирован.`
+      );
+      return;
+    }
+
+    if (order.cancelled || order.filled) {
+      if (config.logLevel === 'debug') {
+        console.log(
+          `[BinanceExecution] Ордер ${order.orderId} уже ${order.cancelled ? 'отменён' : 'заполнен'}, skip cancel`
+        );
+      }
+      return;
+    }
+
+    const orderIdMatch = order.orderId.match(/binance-(\d+)/);
+    if (!orderIdMatch) {
+      console.error(`[BinanceExecution] Invalid orderId format: ${order.orderId}`);
+      return;
+    }
+
+    const binanceOrderId = parseInt(orderIdMatch[1], 10);
+    const symbol = this.toSymbol(order.coin);
+
+    console.log(
+      `[BinanceExecution] Отменяем лимитный ордер ${order.orderId}: ${symbol} @ $${order.price.toFixed(4)}`
+    );
+
+    try {
+      await this.callBinance('DELETE', '/fapi/v1/order', { symbol, orderId: binanceOrderId });
+
+      order.cancelled = true;
+      order.cancelledAt = Date.now();
+
+      console.log(`[BinanceExecution] Ордер ${order.orderId} отменён успешно`);
+    } catch (error) {
+      console.error(`[BinanceExecution] Failed to cancel order ${order.orderId}:`, error);
+    }
+  }
+
+  async checkLimitOrderStatus(order: LimitOrderState): Promise<{ filled: boolean; filledSize?: number }> {
+    if (!this.isLive()) {
+      return { filled: order.filled || false, filledSize: order.filled ? order.sizeUsd : 0 };
+    }
+
+    // TODO: реализовать проверку статуса через /fapi/v1/order с symbol и orderId
+    // const resp = await this.callBinance('GET', '/fapi/v1/order', { symbol, orderId: ... });
+    // return { filled: resp.status === 'FILLED', filledSize: ... };
+
+    return { filled: order.filled || false, filledSize: order.filled ? order.sizeUsd : 0 };
   }
 
   /**

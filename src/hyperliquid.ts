@@ -8,12 +8,14 @@ const HYPERLIQUID_API_URL = 'https://api.hyperliquid.xyz/info';
 export class HyperliquidClient {
   private ws: WebSocket | null = null;
   private subscriptions = new Map<string, Set<(data: OrderBookSnapshot) => void>>();
+  private tradeSubscriptions = new Map<string, Set<(data: any) => void>>();
   private reconnectAttempts = 0;
   private maxReconnectAttempts = 10;
   private reconnectDelay = 5000;
   private isConnected = false;
   private assets: AssetInfo[] = [];
   private pingInterval: NodeJS.Timeout | null = null;
+  private lastUpdateTime = new Map<string, number>();
 
   async initialize(): Promise<void> {
     await this.fetchAssets();
@@ -132,9 +134,28 @@ export class HyperliquidClient {
         levels: message.data.levels,
       };
 
+      // Отслеживаем частоту обновлений для дебага
+      const now = Date.now();
+      const lastUpdate = this.lastUpdateTime.get(snapshot.coin);
+      if (lastUpdate) {
+        const delta = now - lastUpdate;
+        if (delta > 1000) {
+          // Логируем только если задержка > 1 сек (необычно)
+          console.warn(`[Hyperliquid] Large update gap for ${snapshot.coin}: ${delta}ms`);
+        }
+      }
+      this.lastUpdateTime.set(snapshot.coin, now);
+
       const callbacks = this.subscriptions.get(snapshot.coin);
       if (callbacks) {
         callbacks.forEach((callback) => callback(snapshot));
+      }
+    }
+
+    if (message.channel === 'trades' && message.data) {
+      const callbacks = this.tradeSubscriptions.get(message.data.coin);
+      if (callbacks) {
+        callbacks.forEach((callback) => callback(message.data));
       }
     }
   }
@@ -180,6 +201,39 @@ export class HyperliquidClient {
     for (const asset of this.assets) {
       this.subscribeToOrderBook(asset.name, callback);
     }
+  }
+
+  /**
+   * Подписка на сделки (trades) для конкретной монеты.
+   * Сделки приходят моментально и показывают реальное съедание заявок.
+   */
+  subscribeToTrades(coin: string, callback: (data: any) => void): void {
+    if (!this.tradeSubscriptions.has(coin)) {
+      this.tradeSubscriptions.set(coin, new Set());
+
+      if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+        const subscription = {
+          method: 'subscribe',
+          subscription: {
+            type: 'trades',
+            coin: coin,
+          },
+        };
+        this.ws.send(JSON.stringify(subscription));
+        console.log(`[Hyperliquid] Subscribed to ${coin} trades`);
+      }
+    }
+
+    this.tradeSubscriptions.get(coin)!.add(callback);
+  }
+
+  /**
+   * Получить время с последнего обновления для монеты (для дебага).
+   */
+  getTimeSinceLastUpdate(coin: string): number | null {
+    const lastUpdate = this.lastUpdateTime.get(coin);
+    if (!lastUpdate) return null;
+    return Date.now() - lastUpdate;
   }
 
   disconnect(): void {

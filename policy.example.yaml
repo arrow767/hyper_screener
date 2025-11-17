@@ -1,0 +1,112 @@
+# Конфигурация правил контекстного управления объёмом и риском (Спринт 9)
+# 
+# Каждое правило имеет структуру:
+# - name: уникальное имя правила
+#   priority: приоритет (меньше = выше, правила применяются по порядку)
+#   scope: область применения (new_entry, open_position, new_entry_breakdown)
+#   when: условия активации (все должны выполняться)
+#   then: действия при активации
+#
+# Доступные условия (when):
+#   shock30mNatrGte: минимальный шок за 30 минут (в NATR)
+#   shock60mNatrGte: минимальный шок за 60 минут (в NATR)
+#   anchorTradeCountGte: минимальное количество сделок по якорю
+#   anchorWinCountGte: минимальное количество профитных сделок по якорю
+#   anchorLastTradeAgoMinGte: минимум минут с последней сделки
+#   timeInAnchorZoneMinGte: минимум минут в зоне якоря
+#   tpHitsCountEq: точное количество достигнутых TP
+#
+# Доступные действия (then):
+#   allowTrade: разрешить/запретить торговлю (true/false)
+#   sizeMultiplier: множитель размера позиции
+#   tpNatrMultiplier: множитель уровней TP в NATR
+#   slNatrMultiplier: множитель уровней SL в NATR
+
+rules:
+  # Правило 1: Слишком много успешных трейдов от одного якоря
+  # Если от уровня было 5+ профитных сделок, больше не торгуем
+  - name: too_many_wins_on_anchor
+    priority: 1
+    scope: new_entry
+    when:
+      anchorWinCountGte: 5
+    then:
+      allowTrade: false
+
+  # Правило 2: Сильный шок за 30 минут
+  # При умеренном движении используем базовый размер
+  - name: shock_30m_normal
+    priority: 10
+    scope: new_entry
+    when:
+      shock30mNatrGte: 6
+    then:
+      sizeMultiplier: 1.0
+      tpNatrMultiplier: 1.0
+
+  # Правило 3: Очень сильный шок за 60 минут
+  # При сильном тренде увеличиваем размер и отодвигаем TP
+  - name: shock_60m_strong
+    priority: 9
+    scope: new_entry
+    when:
+      shock60mNatrGte: 12
+    then:
+      sizeMultiplier: 2.0
+      tpNatrMultiplier: 1.2
+
+  # Правило 4: Повторный ретест якоря через несколько часов
+  # Если возвращаемся к уровню через 3+ часа, снижаем риск
+  - name: anchor_retest_smaller
+    priority: 8
+    scope: new_entry
+    when:
+      anchorTradeCountGte: 1
+      anchorLastTradeAgoMinGte: 180  # 3 часа
+    then:
+      sizeMultiplier: 0.5
+      tpNatrMultiplier: 0.7
+
+  # Правило 5: Долгое стояние у якоря без тейка
+  # Если позиция простояла 40+ минут без TP, подтягиваем уровни
+  - name: long_time_near_anchor
+    priority: 7
+    scope: open_position
+    when:
+      timeInAnchorZoneMinGte: 40
+      tpHitsCountEq: 0
+    then:
+      tpNatrMultiplier: 0.5
+
+# Примеры дополнительных правил (закомментированы):
+
+# # Агрессивная торговля при экстремальном шоке
+# - name: extreme_shock_aggressive
+#   priority: 5
+#   scope: new_entry
+#   when:
+#     shock60mNatrGte: 20
+#   then:
+#     sizeMultiplier: 3.0
+#     tpNatrMultiplier: 1.5
+
+# # Консервативный подход при первой сделке с якоря
+# - name: first_trade_conservative
+#   priority: 11
+#   scope: new_entry
+#   when:
+#     anchorTradeCountGte: 0
+#   then:
+#     sizeMultiplier: 0.8
+#     tpNatrMultiplier: 0.9
+
+# # Быстрое закрытие при малом движении
+# - name: quick_exit_no_movement
+#   priority: 6
+#   scope: open_position
+#   when:
+#     timeInAnchorZoneMinGte: 20
+#     tpHitsCountEq: 0
+#   then:
+#     tpNatrMultiplier: 0.3
+

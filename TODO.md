@@ -255,16 +255,17 @@
 
 ---
 
-### Спринт 9 — Контекстное управление объёмом, риском и тейками
+### Спринт 9 — Контекстное управление объёмом, риском и тейками ✅ ВЫПОЛНЕН
 
-- **Факторы силы движения (шок по NATR)**:
+- **Факторы силы движения (шок по NATR)**: ✅
   - Ввести расчёт «шока» по NATR: сколько суммарно 5m NATR мы прошли за последние 30 минут / 1 час.
   - Конфиг уровня шока и мультипликаторов объёма: например,
     - `SHOCK_30M_LEVEL_1=6; SHOCK_30M_SIZE_MULT_1=1.0`,
     - `SHOCK_60M_LEVEL_2=12; SHOCK_60M_SIZE_MULT_2=2.0`.
   - На основе этих правил выбирать целевой `positionSizeUsd = TRADE_POSITION_SIZE_USD * shockMultiplier`.
+  - **Реализовано**: `ContextFeaturesService` в `src/trading/contextFeatures.ts`.
 
-- **Память по якорю (одна и та же лимитка)**:
+- **Память по якорю (одна и та же лимитка)**: ✅
   - Вводим сущность «якорь» = (coin, anchorPrice, side), для которой считаем статистику:
     - количество завершённых сделок по этому якорю,
     - количество взятых тейков (успешных трейдов),
@@ -273,14 +274,16 @@
     - если от якоря уже было N профитных сделок (например, 5) → больше **не торговать** от этого уровня;
     - если есть закрытая сделка по этому якорю, и мы снова подходим к нему через X часов →
       уменьшать объём (например, множитель 0.5) и/или делать тейки ближе (уменьшать NATR уровни).
+  - **Реализовано**: `AnchorMemory` в `src/trading/anchorMemory.ts`, хранение в JSON файле.
 
-- **Адаптация тейков во времени (стояние у плотности)**:
+- **Адаптация тейков во времени (стояние у плотности)**: ✅
   - Для каждой открытой позиции хранить `timeSinceEntry` и `timeInAnchorZone` (сколько времени мы провели возле якорной цены без тейка).
   - Конфиг: если `timeInAnchorZone > 40 мин` и ни один TP не был достигнут:
     - сдвигать все оставшиеся TP ближе (например, умножать уровни NATR на 0.5–0.7);
     - либо добавлять дополнительный «time-based TP», который закроет часть/всю позицию.
+  - **Реализовано**: Правило `long_time_near_anchor` в `policy.example.yaml`.
 
-- **Гибкая система правил (policy-движок)**:
+- **Гибкая система правил (policy-движок)**: ✅
   - Вынести все такие условия в конфиг уровня «правил» (policy), например в JSON/YAML:
     - список правил вида: `if <условия по NATR / времени / кол-ву сделок по якорю> → <множители размера / TP / SL>`.
   - Минимальный интерфейс:
@@ -290,62 +293,46 @@
   - Конфиг можно хранить:
     - либо в `.env` как одну/несколько JSON-строк,
     - либо в отдельном `policy.json`/`strategy.json`, путь к которому задаётся через `.env`.
+  - **Реализовано**: 
+    - `PolicyRulesParser` в `src/trading/policyRules.ts` для парсинга YAML;
+    - `PositionPolicy` в `src/trading/positionPolicy.ts` применяет правила из YAML;
+    - Примеры правил в `policy.example.yaml`;
+    - Конфиг `POLICY_RULES_FILE` для указания пути к YAML файлу.
 
-- **Ограничения на число сделок от одной лимитки**:
+- **Ограничения на число сделок от одной лимитки**: ✅
   - Добавить счётчик по якорю: если `anchorWins >= MAX_WINS_PER_ANCHOR` (например, 5) → новые сигналы от этого уровня игнорируются.
   - Порог задавать в конфиге, например `MAX_WINS_PER_ANCHOR=5`.
+  - **Реализовано**: Правило `too_many_wins_on_anchor` в `policy.example.yaml`, конфиг `POLICY_MAX_WINS_PER_ANCHOR`.
 
-- **Примеры правил (draft, YAML)**:
+- **Примеры правил (реализовано в `policy.example.yaml`)**: ✅
 
+См. файл `policy.example.yaml` для полного списка правил с комментариями. Основные правила:
+
+1. **too_many_wins_on_anchor** (priority: 1) - блокировка якоря после 5 профитных сделок
+2. **shock_30m_normal** (priority: 10) - базовый размер при шоке 30м
+3. **shock_60m_strong** (priority: 9) - удвоенный размер при сильном шоке 60м
+4. **anchor_retest_smaller** (priority: 8) - уменьшенный размер при ретесте через 3+ часа
+5. **long_time_near_anchor** (priority: 7) - подтягивание TP при долгом стоянии у якоря
+
+**Структура правила**:
 ```yaml
-rules:
-  # 1) Сильный шок за 30 минут → базовый объём
-  - name: shock_30m_normal
-    scope: new_entry
-    when:
-      shock30mNatrGte: 6
-      shock30mWindowMin: 30
-    then:
-      sizeMultiplier: 1.0
-      tpNatrMultiplier: 1.0
-
-  # 2) Очень сильный шок за час → удвоенный объём и чуть дальше тейки
-  - name: shock_60m_strong
-    scope: new_entry
-    when:
-      shock60mNatrGte: 12
-      shock60mWindowMin: 60
-    then:
-      sizeMultiplier: 2.0
-      tpNatrMultiplier: 1.2
-
-  # 3) Повторный ретест той же лимитки через несколько часов → уменьшаем объём и подтягиваем тейки
-  - name: anchor_retest_smaller
-    scope: new_entry
-    when:
-      anchorTradeCountGte: 1
-      anchorLastTradeAgoMinGte: 180   # 3 часа
-    then:
-      sizeMultiplier: 0.5
-      tpNatrMultiplier: 0.7
-
-  # 4) Стоим у плотности > 40 минут без тейка → делаем тейки ближе
-  - name: long_time_near_anchor
-    scope: open_position
-    when:
-      timeInAnchorZoneMinGte: 40
-      tpHitsCountEq: 0
-    then:
-      tpNatrMultiplier: 0.5
-
-  # 5) Слишком много успешных трейдов от одного якоря → больше не трогаем
-  - name: too_many_wins_on_anchor
-    scope: new_entry
-    when:
-      anchorWinCountGte: 5
-    then:
-      allowTrade: false
+- name: уникальное_имя
+  priority: число (меньше = выше приоритет)
+  scope: new_entry | open_position | new_entry_breakdown
+  when:
+    # условия (все должны выполняться)
+    shock30mNatrGte: 6
+    anchorWinCountGte: 5
+    # и т.д.
+  then:
+    # действия
+    allowTrade: false  # или true
+    sizeMultiplier: 1.5
+    tpNatrMultiplier: 1.2
+    slNatrMultiplier: 1.0
 ```
+
+Для создания собственных правил скопируйте `policy.example.yaml` → `policy.yaml` и настройте по необходимости.
 
 ---
 

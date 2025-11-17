@@ -3,6 +3,7 @@ import { config } from './config';
 import { HyperliquidClient } from './hyperliquid';
 import { TelegramNotifier } from './telegram';
 import { BounceTradingModule } from './trading/bounceTradingModule';
+import { ListingMonitor } from './listingMonitor';
 import fetch from 'node-fetch';
 
 interface MarkPrice {
@@ -15,11 +16,26 @@ export class OrderBookMonitor {
   private markPrices: MarkPrice = {};
   private priceUpdateInterval: NodeJS.Timeout | null = null;
   private tradingModule?: BounceTradingModule;
+  private listingMonitor?: ListingMonitor;
+  private listingCheckInterval: NodeJS.Timeout | null = null;
 
   constructor(tradingModule?: BounceTradingModule) {
     this.hyperliquid = new HyperliquidClient();
     this.telegram = new TelegramNotifier();
     this.tradingModule = tradingModule;
+    
+    // Инициализация мониторинга листингов (если включен)
+    if (config.listingMonitorEnabled) {
+      this.listingMonitor = new ListingMonitor(
+        config.listingHistoryFile,
+        true,
+        config.listingCheckIntervalMs
+      );
+    }
+  }
+
+  getHyperliquidClient(): HyperliquidClient {
+    return this.hyperliquid;
   }
 
   async start(): Promise<void> {
@@ -33,6 +49,12 @@ export class OrderBookMonitor {
     this.hyperliquid.subscribeToAllAssets((snapshot) => {
       this.processOrderBook(snapshot);
     });
+
+    // Запускаем мониторинг новых листингов (если включен)
+    if (this.listingMonitor && config.listingMonitorEnabled) {
+      console.log('[Monitor] Starting listing monitor...');
+      this.startListingMonitor();
+    }
 
     console.log('[Monitor] Monitor started successfully');
 
@@ -71,6 +93,78 @@ export class OrderBookMonitor {
     this.priceUpdateInterval = setInterval(() => {
       this.updateMarkPrices();
     }, 5000);
+  }
+
+  /**
+   * Запуск мониторинга новых листингов.
+   */
+  private startListingMonitor(): void {
+    if (!this.listingMonitor) {
+      return;
+    }
+
+    // Первая проверка сразу после запуска
+    this.checkNewListings();
+
+    // Затем проверяем периодически
+    this.listingCheckInterval = setInterval(() => {
+      this.checkNewListings();
+    }, config.listingCheckIntervalMs);
+
+    console.log(`[Monitor] Listing monitor started, check interval: ${config.listingCheckIntervalMs / 1000}s`);
+  }
+
+  /**
+   * Проверка новых листингов.
+   */
+  private async checkNewListings(): Promise<void> {
+    if (!this.listingMonitor) {
+      return;
+    }
+
+    try {
+      // Получаем текущий список монет из Hyperliquid
+      const assets = this.hyperliquid.getAssets();
+      const coins = assets.map(a => a.name);
+
+      // Проверяем на новые листинги
+      const newListings = this.listingMonitor.processCoins(coins);
+
+      if (newListings.length > 0) {
+        console.log(`[Monitor] 🆕 Обнаружено новых листингов: ${newListings.length}`);
+
+        // Отправляем уведомление в Telegram (если включено)
+        if (config.listingNotifyTelegram && newListings.length > 0) {
+          const message = this.listingMonitor.formatListingMessage(newListings);
+          
+          try {
+            await this.telegram.sendMessage(message);
+            
+            // Отмечаем монеты как уведомлённые
+            for (const listing of newListings) {
+              this.listingMonitor.markAsNotified(listing.coin);
+            }
+            
+            console.log(`[Monitor] ✅ Уведомление о ${newListings.length} новых листингах отправлено в Telegram`);
+          } catch (err) {
+            console.error('[Monitor] ❌ Ошибка при отправке уведомления о листингах:', err);
+          }
+        }
+      }
+    } catch (err) {
+      console.error('[Monitor] Ошибка при проверке новых листингов:', err);
+    }
+  }
+
+  /**
+   * Остановка мониторинга листингов.
+   */
+  private stopListingMonitor(): void {
+    if (this.listingCheckInterval) {
+      clearInterval(this.listingCheckInterval);
+      this.listingCheckInterval = null;
+      console.log('[Monitor] Listing monitor stopped');
+    }
   }
 
   private processOrderBook(snapshot: OrderBookSnapshot): void {
