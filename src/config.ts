@@ -145,6 +145,9 @@ export const config: Config = {
   policyRulesFile: process.env.POLICY_RULES_FILE || './policy.yaml',
   policyAnchorMemoryFile: process.env.POLICY_ANCHOR_MEMORY_FILE || './data/anchor_memory.json',
   
+  // Anti-spoofing
+  tradeMinOrderLifetimeMs: getEnvNumber('TRADE_MIN_ORDER_LIFETIME_MS', 0),
+  
   tradeNatrPeriod: getEnvNumber('TRADE_NATR_PERIOD', 14),
   tradeNatrTimeframe: process.env.TRADE_NATR_TIMEFRAME || '5m',
   tradeTpNatrLevels: parseNumberArray(process.env.TRADE_TP_NATR_LEVELS),

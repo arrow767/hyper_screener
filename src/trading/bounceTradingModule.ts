@@ -81,6 +81,11 @@ export class BounceTradingModule implements TradingModule {
    */
   private readonly tradeLogger: TradeLogger;
   /**
+   * Отслеживание времени первого появления крупных заявок (anti-spoofing).
+   * Ключ: coin-side-price (округленная), значение: timestamp первого появления.
+   */
+  private readonly orderFirstSeen = new Map<string, number>();
+  /**
    * Сервис для расчёта контекстных фичей (Спринт 9).
    */
   private readonly contextFeatures?: ContextFeaturesService;
@@ -121,8 +126,8 @@ export class BounceTradingModule implements TradingModule {
         `entryMode=${config.tradeEntryMode}`
     );
 
-    // Запускаем периодический мониторинг PnL, если включен динамический риск
-    if (config.tradeMaxRiskPerTrade > 0) {
+    // Запускаем периодический мониторинг PnL, если включен динамический риск или anti-spoofing
+    if (config.tradeMaxRiskPerTrade > 0 || config.tradeMinOrderLifetimeMs > 0) {
       this.startPnlMonitoring();
     }
   }
@@ -141,6 +146,9 @@ export class BounceTradingModule implements TradingModule {
       this.checkPnlAndEmergencyClose().catch((err) => {
         console.error('[Trading] Ошибка при проверке PnL:', err);
       });
+      
+      // Периодически очищаем старые записи о заявках (анти-спуфинг)
+      this.cleanupOldOrderTracking();
     }, intervalMs);
   }
 
@@ -577,6 +585,44 @@ export class BounceTradingModule implements TradingModule {
           'В текущей версии поддерживается только PAPER, сигнал проигнорирован.'
       );
       return;
+    }
+
+    // === ANTI-SPOOFING: Проверка времени жизни заявки ===
+    if (config.tradeMinOrderLifetimeMs > 0) {
+      // Создаём уникальный ключ для заявки (округляем цену до 4 знаков для группировки)
+      const priceRounded = order.price.toFixed(4);
+      const orderKey = `${order.coin}-${order.side}-${priceRounded}`;
+      const now = Date.now();
+      
+      const firstSeen = this.orderFirstSeen.get(orderKey);
+      
+      if (!firstSeen) {
+        // Первый раз видим эту заявку - запоминаем время
+        this.orderFirstSeen.set(orderKey, now);
+        console.log(
+          `[Trading] 🔍 ${order.coin} новая заявка ${order.side} @ $${order.price.toFixed(4)} ` +
+          `($${(order.valueUsd / 1000000).toFixed(2)}M), жду стабильности ${config.tradeMinOrderLifetimeMs}мс...`
+        );
+        return; // НЕ торгуем сразу, ждём подтверждения
+      }
+      
+      const lifetime = now - firstSeen;
+      
+      if (lifetime < config.tradeMinOrderLifetimeMs) {
+        // Заявка еще слишком молодая
+        if (config.logLevel === 'debug') {
+          console.log(
+            `[Trading] ⏳ ${order.coin} заявка слишком молодая (${lifetime}мс / ${config.tradeMinOrderLifetimeMs}мс), ` +
+            `жду ещё ${config.tradeMinOrderLifetimeMs - lifetime}мс`
+          );
+        }
+        return; // Спуфер скорее всего снимет
+      }
+      
+      // OK, заявка стабильна достаточно долго
+      console.log(
+        `[Trading] ✅ ${order.coin} заявка стабильна ${lifetime}мс, открываем позицию`
+      );
     }
 
     // Если по монете уже есть in-flight запрос на открытие позиции, не лезем ещё раз
@@ -1134,9 +1180,31 @@ export class BounceTradingModule implements TradingModule {
       console.log('[Trading] PnL-мониторинг остановлен');
     }
 
+    // Очищаем кэш времени появления заявок
+    this.orderFirstSeen.clear();
+
     // В paper-режиме просто логируем закрытие.
     if (this.openPositions.length > 0) {
       console.log(`[Trading] Shutdown: всего открытых виртуальных позиций: ${this.openPositions.length}`);
+    }
+  }
+
+  /**
+   * Очистка устаревших записей о времени появления заявок (анти-спуфинг).
+   * Вызывается периодически для предотвращения утечки памяти.
+   */
+  private cleanupOldOrderTracking(): void {
+    const now = Date.now();
+    const maxAge = 3600000; // 1 час
+    
+    for (const [key, timestamp] of this.orderFirstSeen.entries()) {
+      if (now - timestamp > maxAge) {
+        this.orderFirstSeen.delete(key);
+      }
+    }
+    
+    if (config.logLevel === 'debug') {
+      console.log(`[Trading] Очистка tracking: осталось ${this.orderFirstSeen.size} записей`);
     }
   }
 }

@@ -77,6 +77,12 @@ export interface Config {
    * Хранит статистику по каждому якорю (coin, price, side).
    */
   policyAnchorMemoryFile: string;
+  /**
+   * Минимальное время жизни заявки в миллисекундах (анти-спуфинг).
+   * Если заявка появилась менее чем X мс назад, торговля игнорируется.
+   * Защита от спуферов, которые быстро снимают заявки.
+   */
+  tradeMinOrderLifetimeMs: number;
   
   tradeNatrPeriod: number;
   /**
