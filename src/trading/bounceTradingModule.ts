@@ -449,13 +449,49 @@ export class BounceTradingModule implements TradingModule {
 
   /**
    * Размещение лимитных ордеров на выход (TP).
+   * @param position - позиция
+   * @param natr - текущий NATR
+   * @param replaceExisting - если true, отменяет существующие TP и размещает новые
    */
-  private async placeLimitTpOrders(position: PositionState, natr: number): Promise<void> {
+  private async placeLimitTpOrders(position: PositionState, natr: number, replaceExisting: boolean = false): Promise<void> {
     if (
       !config.tradeTpNatrLevels.length ||
       config.tradeTpNatrLevels.length !== config.tradeTpPercents.length ||
       !config.tradeTpLimitProportions.length
     ) {
+      return;
+    }
+
+    // Если нужно пересчитать - отменяем старые TP лимитки
+    if (replaceExisting && position.tpLimitOrders && position.tpLimitOrders.length > 0) {
+      console.log(
+        `[Trading] Пересчет TP лимиток для ${position.coin}: отменяем ${position.tpLimitOrders.length} старых ордеров`
+      );
+      for (const order of position.tpLimitOrders) {
+        if (!order.cancelled && !order.filled) {
+          try {
+            await this.engine.cancelLimitOrder(order);
+            order.cancelled = true;
+            order.cancelledAt = Date.now();
+          } catch (err) {
+            console.error(`[Trading] Ошибка при отмене TP лимитки ${order.orderId}:`, err);
+          }
+        }
+      }
+    }
+
+    // Рассчитываем фактический размер позиции для TP (учитываем уже исполненные entry лимитки)
+    let actualPositionSize = position.marketFilledSizeUsd || 0;
+    if (position.entryLimitOrders && position.entryLimitOrders.length > 0) {
+      const filledEntry = position.entryLimitOrders
+        .filter(o => o.filled)
+        .reduce((sum, o) => sum + o.sizeUsd, 0);
+      actualPositionSize += filledEntry;
+    }
+
+    // Если фактический размер слишком мал, не размещаем TP
+    if (actualPositionSize < 5) {
+      console.warn(`[Trading] Размер позиции ${position.coin} слишком мал ($${actualPositionSize.toFixed(2)}), TP лимитки не размещаются`);
       return;
     }
 
@@ -468,6 +504,8 @@ export class BounceTradingModule implements TradingModule {
     const natrStep = position.entryPrice * (natr / 100);
     const side = position.side === 'long' ? 'sell' : 'buy';
     const orders: LimitOrderState[] = [];
+    
+    let totalTpSize = 0;
 
     // Размещаем TP лимитки на каждом уровне из tradeTpNatrLevels
     for (let levelIdx = 0; levelIdx < config.tradeTpNatrLevels.length; levelIdx++) {
@@ -475,7 +513,7 @@ export class BounceTradingModule implements TradingModule {
       const percent = config.tradeTpPercents[levelIdx];
 
       // Размер этого TP уровня
-      const levelSizeUsd = position.sizeUsd * (percent / 100);
+      let levelSizeUsd = actualPositionSize * (percent / 100);
 
       // Цена для этого уровня
       const delta = natrStep * level;
@@ -485,19 +523,45 @@ export class BounceTradingModule implements TradingModule {
       // Распределяем levelSizeUsd по пропорциям
       const count = tpProportions.length;
       for (let i = 0; i < count; i++) {
-        const sizeUsd = (levelSizeUsd * tpProportions[i]) / totalProportion;
+        let sizeUsd = (levelSizeUsd * tpProportions[i]) / totalProportion;
+        
+        // Проверка на "пыль" - если лимитка меньше $5, пропускаем
+        if (sizeUsd < 5) {
+          console.warn(
+            `[Trading] ${position.coin} TP лимитка слишком мала ($${sizeUsd.toFixed(2)}), пропускаем`
+          );
+          continue;
+        }
+        
         const order = await this.engine.placeLimitOrder(position.coin, side, price, sizeUsd, 'tp');
         if (order) {
           orders.push(order);
+          totalTpSize += order.sizeUsd;
         }
       }
     }
 
+    // Проверяем остаток "пыли"
+    const dust = actualPositionSize - totalTpSize;
+    if (dust > 0.5) {
+      console.log(
+        `[Trading] ${position.coin} остаток пыли: $${dust.toFixed(2)}. ` +
+        (dust < 5 
+          ? 'Будет закрыт маркет-ордером при достижении первого TP' 
+          : 'ВНИМАНИЕ: большой остаток, проверьте расчеты!')
+      );
+    }
+
     position.tpLimitOrders = orders;
 
+    console.log(
+      `[Trading] Размещено ${orders.length} TP лимитных ордеров для ${position.coin} ` +
+      `(размер позиции: $${actualPositionSize.toFixed(2)}, TP объем: $${totalTpSize.toFixed(2)}, пыль: $${dust.toFixed(2)})`
+    );
+    
     if (config.logLevel === 'debug' && orders.length) {
       console.log(
-        `[Trading] Размещено ${orders.length} TP лимитных ордеров для ${position.coin}: ` +
+        `[Trading] Детали TP: ` +
           orders.map((o) => `$${o.price.toFixed(4)} (${o.sizeUsd.toFixed(2)} USD)`).join(', ')
       );
     }
@@ -1048,22 +1112,19 @@ export class BounceTradingModule implements TradingModule {
             order.filledAt = Date.now();
             position.limitFilledSizeUsd = (position.limitFilledSizeUsd || 0) + order.sizeUsd;
 
-            if (config.logLevel === 'debug') {
-              console.log(
-                `[Trading] Лимитный ордер на вход ${order.orderId} исполнен: ${order.side.toUpperCase()} ${
-                  position.coin
-                } @ $${order.price.toFixed(4)}, sizeUsd=${order.sizeUsd.toFixed(2)}`
-              );
-            }
+            console.log(
+              `[Trading] ✅ Лимитный ордер на вход ${order.orderId} исполнен: ${order.side.toUpperCase()} ${
+                position.coin
+              } @ $${order.price.toFixed(4)}, +$${order.sizeUsd.toFixed(2)} (всего набрано: $${position.limitFilledSizeUsd.toFixed(2)})`
+            );
 
-            // После исполнения лимитного ордера размещаем TP лимитки (если ещё не размещены)
-            if (
-              config.tradeTpLimitProportions.length > 0 &&
-              (!position.tpLimitOrders || position.tpLimitOrders.length === 0)
-            ) {
+            // После исполнения лимитного ордера пересчитываем TP лимитки
+            if (config.tradeTpLimitProportions.length > 0) {
               const natr = this.natrService?.getNatr(position.coin);
               if (natr && natr > 0) {
-                await this.placeLimitTpOrders(position, natr);
+                // Если TP уже есть, заменяем их на новые с пересчитанным объемом
+                const replaceExisting = position.tpLimitOrders && position.tpLimitOrders.length > 0;
+                await this.placeLimitTpOrders(position, natr, replaceExisting);
               }
             }
           }
@@ -1085,14 +1146,23 @@ export class BounceTradingModule implements TradingModule {
             position.sizeUsd -= order.sizeUsd;
 
             console.log(
-              `[Trading] TP лимитный ордер ${order.orderId} исполнен: ${order.side.toUpperCase()} ${
+              `[Trading] ✅ TP лимитный ордер ${order.orderId} исполнен: ${order.side.toUpperCase()} ${
                 position.coin
-              } @ $${order.price.toFixed(4)}, sizeUsd=${order.sizeUsd.toFixed(2)}`
+              } @ $${order.price.toFixed(4)}, -$${order.sizeUsd.toFixed(2)} (осталось: $${position.sizeUsd.toFixed(2)})`
             );
 
             // Если позиция полностью закрыта через TP лимитки
             if (position.sizeUsd <= 0) {
               positionsToClose.push({ position, reason: 'tp_limit_all_hit' });
+              break;
+            }
+
+            // Если осталась "пыль" (< $5), закрываем маркет-ордером
+            if (position.sizeUsd > 0 && position.sizeUsd < 5) {
+              console.log(
+                `[Trading] ${position.coin} осталась пыль ($${position.sizeUsd.toFixed(2)}), закрываем маркет-ордером`
+              );
+              positionsToClose.push({ position, reason: 'tp_dust_cleanup' });
               break;
             }
           }

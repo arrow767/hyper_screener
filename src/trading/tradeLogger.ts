@@ -228,12 +228,32 @@ export class TradeLogger {
     const durationSeconds = Math.round(durationMs / 1000);
     const durationMinutes = durationMs / 1000 / 60;
     
-    // Расчёт PnL
+    // Расчёт фактического размера позиции на момент закрытия
+    // Учитываем частичные закрытия по TP лимиткам
+    let currentSizeUsd = position.sizeUsd;
+    if (position.tpLimitOrders && position.tpLimitOrders.length > 0) {
+      const closedByTp = position.tpLimitOrders
+        .filter(o => o.filled)
+        .reduce((sum, o) => sum + o.sizeUsd, 0);
+      currentSizeUsd = position.sizeUsd - closedByTp;
+    }
+    
+    // Расчёт PnL (правильная формула для long и short)
     const priceDiff = position.side === 'long'
       ? exitPrice - position.entryPrice
       : position.entryPrice - exitPrice;
     const pnlPercent = (priceDiff / position.entryPrice) * 100;
-    const pnlUsd = (position.sizeUsd * pnlPercent) / 100;
+    
+    // PnL рассчитывается от фактического размера позиции на момент выхода
+    const pnlUsd = (currentSizeUsd * pnlPercent) / 100;
+    
+    // Расчёт комиссий (приблизительно, если нет точных данных от биржи)
+    // Binance Futures: maker 0.02%, taker 0.04%
+    // Hyperliquid: maker 0.00%, taker 0.035%
+    // Используем консервативную оценку: entry taker 0.04%, exit может быть maker 0.02% или taker 0.04%
+    const entryFeeUsd = position.sizeUsd * 0.0004; // 0.04% на вход
+    const exitFeeUsd = currentSizeUsd * 0.0004;  // 0.04% на выход (консервативно)
+    const totalFeeUsd = entryFeeUsd + exitFeeUsd;
     
     // Подсчёт использованных лимитных ордеров
     const limitOrdersUsed = 
@@ -261,9 +281,12 @@ export class TradeLogger {
       durationMinutes,
       entryPrice: position.entryPrice,
       exitPrice,
-      sizeUsd: position.sizeUsd,
+      sizeUsd: position.sizeUsd, // Изначальный размер
       pnlUsd,
       pnlPercent,
+      entryFeeUsd,
+      exitFeeUsd,
+      totalFeeUsd,
       natr,
       closeReason,
       entryMode,
