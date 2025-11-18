@@ -406,8 +406,22 @@ export class BinanceExecutionEngine implements ExecutionEngine {
       order.cancelledAt = Date.now();
 
       console.log(`[BinanceExecution] Ордер ${order.orderId} отменён успешно`);
-    } catch (error) {
-      console.error(`[BinanceExecution] Failed to cancel order ${order.orderId}:`, error);
+    } catch (error: any) {
+      // Ошибки -2011 (Unknown order) и -2013 (Order does not exist) означают,
+      // что ордер уже исполнен или отменен - это нормально, не выбрасываем exception
+      const errorMsg = error?.message || String(error);
+      
+      if (errorMsg.includes('-2011') || errorMsg.includes('-2013')) {
+        console.log(
+          `[BinanceExecution] Ордер ${order.orderId} уже не существует (исполнен или отменен ранее)`
+        );
+        // Помечаем как отменённый, чтобы больше не пытаться отменить
+        order.cancelled = true;
+        order.cancelledAt = Date.now();
+      } else {
+        // Остальные ошибки логируем как серьезные, но не падаем
+        console.error(`[BinanceExecution] Failed to cancel order ${order.orderId}:`, error);
+      }
     }
   }
 
