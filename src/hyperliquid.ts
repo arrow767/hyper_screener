@@ -1,6 +1,7 @@
 import WebSocket from 'ws';
 import fetch from 'node-fetch';
 import { OrderBookSnapshot, AssetInfo, Meta } from './types';
+import { config } from './config';
 
 const HYPERLIQUID_WS_URL = 'wss://api.hyperliquid.xyz/ws';
 const HYPERLIQUID_API_URL = 'https://api.hyperliquid.xyz/info';
