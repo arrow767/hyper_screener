@@ -109,6 +109,35 @@ export interface PositionState {
    * Размер позиции, уже заполненный через лимитные ордера (USD).
    */
   limitFilledSizeUsd?: number;
+  /**
+   * Реальные trades от биржи при открытии позиции (для точного расчета PnL).
+   */
+  entryTrades?: BinanceTrade[];
+  /**
+   * Реальные trades от биржи при закрытии позиции (для точного расчета PnL).
+   */
+  exitTrades?: BinanceTrade[];
+}
+
+/**
+ * Trade (исполнение) от Binance Futures API.
+ */
+export interface BinanceTrade {
+  symbol: string;
+  id: number;
+  orderId: number;
+  side: 'BUY' | 'SELL';
+  price: string;
+  qty: string;
+  realizedPnl: string;
+  marginAsset: string;
+  quoteQty: string;
+  commission: string;
+  commissionAsset: string;
+  time: number;
+  positionSide: string;
+  buyer: boolean;
+  maker: boolean;
 }
 
 /**

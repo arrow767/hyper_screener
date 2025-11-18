@@ -178,6 +178,27 @@ export class BinanceExecutionEngine implements ExecutionEngine {
   }
 
   /**
+   * Получить реальные trades (исполнения) для ордера с Binance.
+   * Возвращает массив trades с ценами, комиссиями и т.д.
+   */
+  private async getOrderTrades(symbol: string, orderId: number): Promise<any[]> {
+    if (!this.isLive()) {
+      return [];
+    }
+
+    try {
+      const trades = await this.callBinance('GET', '/fapi/v1/userTrades', {
+        symbol,
+        orderId,
+      });
+      return Array.isArray(trades) ? trades : [];
+    } catch (error) {
+      console.error(`[BinanceExecution] Failed to get trades for order ${orderId}:`, error);
+      return [];
+    }
+  }
+
+  /**
    * Конвертация монеты в Binance futures symbol.
    * Пример: BTC -> BTCUSDT.
    */

@@ -137,10 +137,10 @@ export class HyperliquidClient {
       // Отслеживаем частоту обновлений для дебага
       const now = Date.now();
       const lastUpdate = this.lastUpdateTime.get(snapshot.coin);
-      if (lastUpdate) {
+      if (lastUpdate && config.logLevel === 'debug') {
         const delta = now - lastUpdate;
         if (delta > 1000) {
-          // Логируем только если задержка > 1 сек (необычно)
+          // Логируем только если задержка > 1 сек (необычно) и в debug режиме
           console.warn(`[Hyperliquid] Large update gap for ${snapshot.coin}: ${delta}ms`);
         }
       }
