@@ -90,6 +90,35 @@ rules:
 #     sizeMultiplier: 3.0
 #     tpNatrMultiplier: 1.5
 
+# # Правило с диапазоном (от 6 до 12 NATR) - комбинация Gte и Lte
+# - name: shock_30m_moderate_range
+#   priority: 10
+#   scope: new_entry
+#   when:
+#     shock30mNatrGte: 6    # >= 6 NATR
+#     shock30mNatrLte: 12   # <= 12 NATR (итого: 6-12 NATR)
+#   then:
+#     sizeMultiplier: 1.0
+#     tpNatrMultiplier: 1.0
+
+# # Слабое движение (меньше 6 NATR) - не торгуем
+# - name: weak_movement_skip
+#   priority: 15
+#   scope: new_entry
+#   when:
+#     shock30mNatrLte: 6    # <= 6 NATR (слабое движение)
+#   then:
+#     allowTrade: false
+
+# # Ограничить количество сделок с одного якоря (максимум 3)
+# - name: max_trades_per_anchor
+#   priority: 5
+#   scope: new_entry
+#   when:
+#     anchorTradeCountGte: 3  # Уже было >= 3 сделок
+#   then:
+#     allowTrade: false
+
 # # Консервативный подход при первой сделке с якоря
 # - name: first_trade_conservative
 #   priority: 11

@@ -40,30 +40,55 @@ export class PositionPolicy {
   private checkConditions(rule: PolicyRule, features: ContextFeatures): boolean {
     const cond = rule.when;
     
+    // shock30mNatr: >= и <=
     if (cond.shock30mNatrGte !== undefined && features.shock30mNatr < cond.shock30mNatrGte) {
       return false;
     }
+    if (cond.shock30mNatrLte !== undefined && features.shock30mNatr > cond.shock30mNatrLte) {
+      return false;
+    }
     
+    // shock60mNatr: >= и <=
     if (cond.shock60mNatrGte !== undefined && features.shock60mNatr < cond.shock60mNatrGte) {
       return false;
     }
+    if (cond.shock60mNatrLte !== undefined && features.shock60mNatr > cond.shock60mNatrLte) {
+      return false;
+    }
     
+    // anchorTradeCount: >= и <=
     if (cond.anchorTradeCountGte !== undefined && features.anchorTradeCount < cond.anchorTradeCountGte) {
       return false;
     }
+    if (cond.anchorTradeCountLte !== undefined && features.anchorTradeCount > cond.anchorTradeCountLte) {
+      return false;
+    }
     
+    // anchorWinCount: >= и <=
     if (cond.anchorWinCountGte !== undefined && features.anchorWinCount < cond.anchorWinCountGte) {
       return false;
     }
+    if (cond.anchorWinCountLte !== undefined && features.anchorWinCount > cond.anchorWinCountLte) {
+      return false;
+    }
     
+    // anchorLastTradeAgoMin: >= и <=
     if (cond.anchorLastTradeAgoMinGte !== undefined && features.anchorLastTradeAgoMin < cond.anchorLastTradeAgoMinGte) {
       return false;
     }
-    
-    if (cond.timeInAnchorZoneMinGte !== undefined && features.timeInAnchorZoneMin < cond.timeInAnchorZoneMinGte) {
+    if (cond.anchorLastTradeAgoMinLte !== undefined && features.anchorLastTradeAgoMin > cond.anchorLastTradeAgoMinLte) {
       return false;
     }
     
+    // timeInAnchorZoneMin: >= и <=
+    if (cond.timeInAnchorZoneMinGte !== undefined && features.timeInAnchorZoneMin < cond.timeInAnchorZoneMinGte) {
+      return false;
+    }
+    if (cond.timeInAnchorZoneMinLte !== undefined && features.timeInAnchorZoneMin > cond.timeInAnchorZoneMinLte) {
+      return false;
+    }
+    
+    // tpHitsCount: ==
     if (cond.tpHitsCountEq !== undefined && features.tpHitsCount !== cond.tpHitsCountEq) {
       return false;
     }

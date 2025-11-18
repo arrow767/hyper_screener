@@ -21,25 +21,49 @@ export interface RuleConditions {
    */
   shock30mNatrGte?: number;
   /**
+   * Максимальный шок за 30 минут (в NATR)
+   */
+  shock30mNatrLte?: number;
+  /**
    * Минимальный шок за 60 минут (в NATR)
    */
   shock60mNatrGte?: number;
+  /**
+   * Максимальный шок за 60 минут (в NATR)
+   */
+  shock60mNatrLte?: number;
   /**
    * Минимальное количество сделок по якорю
    */
   anchorTradeCountGte?: number;
   /**
+   * Максимальное количество сделок по якорю
+   */
+  anchorTradeCountLte?: number;
+  /**
    * Минимальное количество профитных сделок по якорю
    */
   anchorWinCountGte?: number;
+  /**
+   * Максимальное количество профитных сделок по якорю
+   */
+  anchorWinCountLte?: number;
   /**
    * Минимум минут с последней сделки по якорю
    */
   anchorLastTradeAgoMinGte?: number;
   /**
+   * Максимум минут с последней сделки по якорю
+   */
+  anchorLastTradeAgoMinLte?: number;
+  /**
    * Минимум минут в зоне якоря
    */
   timeInAnchorZoneMinGte?: number;
+  /**
+   * Максимум минут в зоне якоря
+   */
+  timeInAnchorZoneMinLte?: number;
   /**
    * Точное количество достигнутых TP
    */
@@ -192,11 +216,17 @@ export class PolicyRulesParser {
   private static validateConditions(when: any, ruleName: string): void {
     const validKeys = [
       'shock30mNatrGte',
+      'shock30mNatrLte',
       'shock60mNatrGte',
+      'shock60mNatrLte',
       'anchorTradeCountGte',
+      'anchorTradeCountLte',
       'anchorWinCountGte',
+      'anchorWinCountLte',
       'anchorLastTradeAgoMinGte',
+      'anchorLastTradeAgoMinLte',
       'timeInAnchorZoneMinGte',
+      'timeInAnchorZoneMinLte',
       'tpHitsCountEq'
     ];
 
