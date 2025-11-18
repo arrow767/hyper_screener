@@ -144,6 +144,8 @@ export const config: Config = {
   policyEnabled: getEnvBool('POLICY_ENABLED', false),
   policyRulesFile: process.env.POLICY_RULES_FILE || './policy.yaml',
   policyAnchorMemoryFile: process.env.POLICY_ANCHOR_MEMORY_FILE || './data/anchor_memory.json',
+  policyShockWindow1Min: getEnvNumber('POLICY_SHOCK_WINDOW1_MIN', 30),
+  policyShockWindow2Min: getEnvNumber('POLICY_SHOCK_WINDOW2_MIN', 60),
   
   // Anti-spoofing
   tradeMinOrderLifetimeMs: getEnvNumber('TRADE_MIN_ORDER_LIFETIME_MS', 0),

@@ -310,8 +310,8 @@ export class BounceTradingModule implements TradingModule {
 
     // Собираем контекстные фичи
     const features: ContextFeatures = {
-      shock30mNatr: this.contextFeatures.calculateNatrShock(coin, 30 * 60 * 1000),
-      shock60mNatr: this.contextFeatures.calculateNatrShock(coin, 60 * 60 * 1000),
+      shock30mNatr: this.contextFeatures.calculateNatrShock(coin, config.policyShockWindow1Min * 60 * 1000),
+      shock60mNatr: this.contextFeatures.calculateNatrShock(coin, config.policyShockWindow2Min * 60 * 1000),
       timeInAnchorZoneMin: 0, // Для новой позиции = 0
       timeSinceEntryMin: 0,   // Для новой позиции = 0
       anchorTradeCount: this.anchorMemory.getStats(anchorId)?.totalTrades || 0,
