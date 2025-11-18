@@ -228,6 +228,80 @@ export class TradeLogger {
     const durationSeconds = Math.round(durationMs / 1000);
     const durationMinutes = durationMs / 1000 / 60;
     
+    // Используем реальные trades от Binance для точного расчета
+    let actualEntryPrice = position.entryPrice;
+    let actualExitPrice = exitPrice;
+    let entryFeeUsd = 0;
+    let exitFeeUsd = 0;
+    
+    // Рассчитываем weighted average entry price из реальных trades
+    if (position.entryTrades && position.entryTrades.length > 0) {
+      let totalQty = 0;
+      let totalCost = 0;
+      
+      for (const trade of position.entryTrades) {
+        const qty = parseFloat(trade.qty);
+        const price = parseFloat(trade.price);
+        const commission = parseFloat(trade.commission);
+        
+        totalQty += qty;
+        totalCost += qty * price;
+        
+        // Комиссия в USDT
+        if (trade.commissionAsset === 'USDT') {
+          entryFeeUsd += commission;
+        }
+      }
+      
+      if (totalQty > 0) {
+        actualEntryPrice = totalCost / totalQty;
+      }
+      
+      console.log(
+        `[TradeLogger] Entry: ${position.entryTrades.length} trades, ` +
+        `weighted avg: $${actualEntryPrice.toFixed(4)}, fees: $${entryFeeUsd.toFixed(4)}`
+      );
+    }
+    
+    // Рассчитываем weighted average exit price из реальных trades
+    if (position.exitTrades && position.exitTrades.length > 0) {
+      let totalQty = 0;
+      let totalValue = 0;
+      
+      for (const trade of position.exitTrades) {
+        const qty = parseFloat(trade.qty);
+        const price = parseFloat(trade.price);
+        const commission = parseFloat(trade.commission);
+        
+        totalQty += qty;
+        totalValue += qty * price;
+        
+        // Комиссия в USDT
+        if (trade.commissionAsset === 'USDT') {
+          exitFeeUsd += commission;
+        }
+      }
+      
+      if (totalQty > 0) {
+        actualExitPrice = totalValue / totalQty;
+      }
+      
+      console.log(
+        `[TradeLogger] Exit: ${position.exitTrades.length} trades, ` +
+        `weighted avg: $${actualExitPrice.toFixed(4)}, fees: $${exitFeeUsd.toFixed(4)}`
+      );
+    } else {
+      // Fallback: если нет реальных trades, оцениваем комиссию
+      exitFeeUsd = position.sizeUsd * 0.0004;
+    }
+    
+    // Если нет entry trades, оцениваем комиссию
+    if (!position.entryTrades || position.entryTrades.length === 0) {
+      entryFeeUsd = position.sizeUsd * 0.0004;
+    }
+    
+    const totalFeeUsd = entryFeeUsd + exitFeeUsd;
+    
     // Расчёт фактического размера позиции на момент закрытия
     // Учитываем частичные закрытия по TP лимиткам
     let currentSizeUsd = position.sizeUsd;
@@ -240,20 +314,12 @@ export class TradeLogger {
     
     // Расчёт PnL (правильная формула для long и short)
     const priceDiff = position.side === 'long'
-      ? exitPrice - position.entryPrice
-      : position.entryPrice - exitPrice;
-    const pnlPercent = (priceDiff / position.entryPrice) * 100;
+      ? actualExitPrice - actualEntryPrice
+      : actualEntryPrice - actualExitPrice;
+    const pnlPercent = (priceDiff / actualEntryPrice) * 100;
     
     // PnL рассчитывается от фактического размера позиции на момент выхода
     const pnlUsd = (currentSizeUsd * pnlPercent) / 100;
-    
-    // Расчёт комиссий (приблизительно, если нет точных данных от биржи)
-    // Binance Futures: maker 0.02%, taker 0.04%
-    // Hyperliquid: maker 0.00%, taker 0.035%
-    // Используем консервативную оценку: entry taker 0.04%, exit может быть maker 0.02% или taker 0.04%
-    const entryFeeUsd = position.sizeUsd * 0.0004; // 0.04% на вход
-    const exitFeeUsd = currentSizeUsd * 0.0004;  // 0.04% на выход (консервативно)
-    const totalFeeUsd = entryFeeUsd + exitFeeUsd;
     
     // Подсчёт использованных лимитных ордеров
     const limitOrdersUsed = 
@@ -271,6 +337,11 @@ export class TradeLogger {
       entryMode = 'limit';
     }
     
+    console.log(
+      `[TradeLogger] 💰 Final PnL: $${pnlUsd.toFixed(2)} (${pnlPercent.toFixed(2)}%), ` +
+      `fees: $${totalFeeUsd.toFixed(2)}, net: $${(pnlUsd - totalFeeUsd).toFixed(2)}`
+    );
+    
     return {
       tradeId: position.id,
       coin: position.coin,
@@ -279,8 +350,8 @@ export class TradeLogger {
       closedAt,
       durationSeconds,
       durationMinutes,
-      entryPrice: position.entryPrice,
-      exitPrice,
+      entryPrice: actualEntryPrice,
+      exitPrice: actualExitPrice,
       sizeUsd: position.sizeUsd, // Изначальный размер
       pnlUsd,
       pnlPercent,

@@ -252,18 +252,49 @@ export class BinanceExecutionEngine implements ExecutionEngine {
 
       const id = `binance-${resp.orderId}`;
 
+      // Получаем реальные trades для точного расчета PnL
+      await new Promise(resolve => setTimeout(resolve, 500)); // Даем время на исполнение
+      const entryTrades = await this.getOrderTrades(symbol, resp.orderId);
+
+      // Рассчитываем weighted average entry price из реальных trades
+      let actualEntryPrice = price;
+      let actualSizeUsd = signal.targetPositionSizeUsd;
+      
+      if (entryTrades.length > 0) {
+        let totalQty = 0;
+        let totalCost = 0;
+        
+        for (const trade of entryTrades) {
+          const tradeQty = parseFloat(trade.qty);
+          const tradePrice = parseFloat(trade.price);
+          totalQty += tradeQty;
+          totalCost += tradeQty * tradePrice;
+        }
+        
+        if (totalQty > 0) {
+          actualEntryPrice = totalCost / totalQty;
+          actualSizeUsd = totalCost;
+        }
+
+        console.log(
+          `[BinanceExecution] Получено ${entryTrades.length} реальных trades для entry. ` +
+          `Weighted avg price: $${actualEntryPrice.toFixed(4)}, actual size: $${actualSizeUsd.toFixed(2)}`
+        );
+      }
+
       const position: PositionState = {
         id,
         coin: signal.coin,
         side: signal.side,
-        entryPrice: price,
-        sizeUsd: signal.targetPositionSizeUsd,
+        entryPrice: actualEntryPrice,
+        sizeUsd: actualSizeUsd,
         openedAt: Date.now(),
+        entryTrades,
       };
 
       console.log(
         `[BinanceExecution] Открыта позиция: ${position.side.toUpperCase()} ${position.coin} ` +
-          `sizeUsd=${position.sizeUsd} @ ~${position.entryPrice.toFixed(4)} (orderId=${resp.orderId})`
+          `sizeUsd=${position.sizeUsd.toFixed(2)} @ $${position.entryPrice.toFixed(4)} (orderId=${resp.orderId})`
       );
 
       return position;
@@ -298,13 +329,39 @@ export class BinanceExecutionEngine implements ExecutionEngine {
     );
 
     try {
-      await this.callBinance('POST', '/fapi/v1/order', {
+      const resp = (await this.callBinance('POST', '/fapi/v1/order', {
         symbol,
         side,
         type: 'MARKET',
         quantity,
         reduceOnly: 'true',
-      });
+      })) as BinanceOrderResponse;
+
+      // Получаем реальные trades для точного расчета PnL
+      await new Promise(resolve => setTimeout(resolve, 500)); // Даем время на исполнение
+      const exitTrades = await this.getOrderTrades(symbol, resp.orderId);
+
+      // Сохраняем exit trades в позицию для расчета PnL
+      position.exitTrades = exitTrades;
+
+      if (exitTrades.length > 0) {
+        let totalQty = 0;
+        let totalValue = 0;
+        
+        for (const trade of exitTrades) {
+          const tradeQty = parseFloat(trade.qty);
+          const tradePrice = parseFloat(trade.price);
+          totalQty += tradeQty;
+          totalValue += tradeQty * tradePrice;
+        }
+        
+        const avgExitPrice = totalQty > 0 ? totalValue / totalQty : 0;
+        
+        console.log(
+          `[BinanceExecution] Получено ${exitTrades.length} реальных trades для exit. ` +
+          `Weighted avg price: $${avgExitPrice.toFixed(4)}`
+        );
+      }
 
       console.log(
         `[BinanceExecution] closePosition отправлен: ${position.side.toUpperCase()} ${position.coin} sizeUsd=${position.sizeUsd}, reason=${reason}`
