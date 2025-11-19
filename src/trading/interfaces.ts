@@ -108,6 +108,10 @@ export interface PositionState {
    */
   tpPriceCache?: Map<number, number>;
   /**
+   * NATR на момент размещения TP (чтобы не пересчитывать при изменении NATR).
+   */
+  tpNatrSnapshot?: number;
+  /**
    * Размер позиции, уже заполненный через рыночные ордера (USD).
    */
   marketFilledSizeUsd?: number;

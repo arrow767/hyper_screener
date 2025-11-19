@@ -452,8 +452,14 @@ export class BounceTradingModule implements TradingModule {
    * @param position - позиция
    * @param natr - текущий NATR
    * @param replaceExisting - если true, отменяет существующие TP и размещает новые
+   * @param forceRecalculatePrices - если true, пересчитывает цены TP (например при изменении средней цены входа)
    */
-  private async placeLimitTpOrders(position: PositionState, natr: number, replaceExisting: boolean = false): Promise<void> {
+  private async placeLimitTpOrders(
+    position: PositionState, 
+    natr: number, 
+    replaceExisting: boolean = false,
+    forceRecalculatePrices: boolean = false
+  ): Promise<void> {
     if (
       !config.tradeTpNatrLevels.length ||
       config.tradeTpNatrLevels.length !== config.tradeTpPercents.length ||
@@ -516,7 +522,26 @@ export class BounceTradingModule implements TradingModule {
       return;
     }
 
-    const natrStep = position.entryPrice * (natr / 100);
+    // Сохраняем NATR snapshot при первом размещении
+    if (!position.tpNatrSnapshot) {
+      position.tpNatrSnapshot = natr;
+      console.log(`[Trading] ${position.coin} сохранен NATR snapshot: ${natr.toFixed(4)} (${(natr * 100).toFixed(2)}%)`);
+    }
+
+    // Используем сохраненный NATR для расчета цен (если цены не пересчитываются принудительно)
+    const natrForPrices = forceRecalculatePrices ? natr : position.tpNatrSnapshot;
+    
+    if (forceRecalculatePrices && natr !== position.tpNatrSnapshot) {
+      console.log(
+        `[Trading] ${position.coin} пересчет цен TP с новым NATR: ${natr.toFixed(4)} ` +
+        `(было: ${position.tpNatrSnapshot.toFixed(4)})`
+      );
+      position.tpNatrSnapshot = natr;
+      // Очищаем кэш цен чтобы пересчитать
+      position.tpPriceCache = new Map();
+    }
+
+    const natrStep = position.entryPrice * (natrForPrices / 100);
     const side = position.side === 'long' ? 'sell' : 'buy';
     const orders: LimitOrderState[] = [];
     
@@ -539,7 +564,7 @@ export class BounceTradingModule implements TradingModule {
       let price: number;
       if (position.tpPriceCache.has(levelIdx)) {
         price = position.tpPriceCache.get(levelIdx)!;
-        if (replaceExisting) {
+        if (replaceExisting && config.logLevel === 'debug') {
           console.log(
             `[Trading] ${position.coin} TP уровень ${levelIdx}: используем сохраненную цену $${price.toFixed(4)}`
           );
@@ -549,7 +574,8 @@ export class BounceTradingModule implements TradingModule {
         price = position.side === 'long' ? position.entryPrice + delta : position.entryPrice - delta;
         position.tpPriceCache.set(levelIdx, price);
         console.log(
-          `[Trading] ${position.coin} TP уровень ${levelIdx}: новая цена $${price.toFixed(4)} (${level} NATR)`
+          `[Trading] ${position.coin} TP уровень ${levelIdx}: новая цена $${price.toFixed(4)} ` +
+          `(${level} × ${natrForPrices.toFixed(4)} NATR)`
         );
       }
 
@@ -902,7 +928,8 @@ export class BounceTradingModule implements TradingModule {
       await this.placeLimitEntryOrders(position, order.price, limitSizeUsd, natr);
     }
 
-    // Размещаем TP лимитками (если настроено)
+    // Размещаем TP лимитками СРАЗУ на market filled размер (если настроено)
+    // Когда entry limits исполнятся, TP пересчитаются с новой средней ценой
     if (config.tradeTpLimitProportions.length > 0) {
       await this.placeLimitTpOrders(position, natr);
     } else {
@@ -1153,13 +1180,46 @@ export class BounceTradingModule implements TradingModule {
             if (config.tradeTpLimitProportions.length > 0) {
               const natr = this.natrService?.getNatr(position.coin);
               if (natr && natr > 0) {
-                // Обновляем initialSizeUsd для пересчета TP
+                // Рассчитываем новый полный размер позиции
                 const newTotalSize = (position.marketFilledSizeUsd || 0) + (position.limitFilledSizeUsd || 0);
                 position.initialSizeUsd = newTotalSize;
                 
-                // Если TP уже есть, заменяем их на новые с пересчитанным объемом
+                // Рассчитываем новую среднюю цену входа (weighted average)
+                let totalQty = 0;
+                let totalCost = 0;
+                
+                // Считаем от market entry
+                if (position.marketFilledSizeUsd && position.marketFilledSizeUsd > 0) {
+                  const marketQty = position.marketFilledSizeUsd / position.entryPrice;
+                  totalQty += marketQty;
+                  totalCost += position.marketFilledSizeUsd;
+                }
+                
+                // Добавляем исполненные entry limits
+                if (position.entryLimitOrders) {
+                  for (const entryOrder of position.entryLimitOrders) {
+                    if (entryOrder.filled) {
+                      const limitQty = entryOrder.sizeUsd / entryOrder.price;
+                      totalQty += limitQty;
+                      totalCost += entryOrder.sizeUsd;
+                    }
+                  }
+                }
+                
+                // Обновляем среднюю цену входа
+                const oldEntryPrice = position.entryPrice;
+                if (totalQty > 0 && totalCost > 0) {
+                  position.entryPrice = totalCost / totalQty;
+                  console.log(
+                    `[Trading] ${position.coin} новая средняя цена входа: $${position.entryPrice.toFixed(4)} ` +
+                    `(было: $${oldEntryPrice.toFixed(4)})`
+                  );
+                }
+                
+                // Если TP уже есть, заменяем их на новые с пересчитанным объемом И ценами
                 const replaceExisting = position.tpLimitOrders && position.tpLimitOrders.length > 0;
-                await this.placeLimitTpOrders(position, natr, replaceExisting);
+                const forceRecalculatePrices = true; // ВАЖНО: пересчитываем цены от новой средней!
+                await this.placeLimitTpOrders(position, natr, replaceExisting, forceRecalculatePrices);
               }
             }
           }
