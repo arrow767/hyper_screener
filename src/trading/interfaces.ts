@@ -102,6 +102,11 @@ export interface PositionState {
    */
   tpLimitOrders?: LimitOrderState[];
   /**
+   * Сохраненные цены TP уровней (чтобы не пересчитывать при изменении объема).
+   * Ключ: индекс уровня (0, 1, 2...), значение: цена.
+   */
+  tpPriceCache?: Map<number, number>;
+  /**
    * Размер позиции, уже заполненный через рыночные ордера (USD).
    */
   marketFilledSizeUsd?: number;

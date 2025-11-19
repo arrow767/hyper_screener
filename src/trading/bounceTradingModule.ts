@@ -490,7 +490,7 @@ export class BounceTradingModule implements TradingModule {
     }
 
     // Если фактический размер слишком мал, не размещаем TP
-    if (actualPositionSize < 5) {
+    if (actualPositionSize < 10) {
       console.warn(`[Trading] Размер позиции ${position.coin} слишком мал ($${actualPositionSize.toFixed(2)}), TP лимитки не размещаются`);
       return;
     }
@@ -507,6 +507,11 @@ export class BounceTradingModule implements TradingModule {
     
     let totalTpSize = 0;
 
+    // Инициализируем кэш цен TP если его нет
+    if (!position.tpPriceCache) {
+      position.tpPriceCache = new Map();
+    }
+
     // Размещаем TP лимитки на каждом уровне из tradeTpNatrLevels
     for (let levelIdx = 0; levelIdx < config.tradeTpNatrLevels.length; levelIdx++) {
       const level = config.tradeTpNatrLevels[levelIdx];
@@ -515,18 +520,31 @@ export class BounceTradingModule implements TradingModule {
       // Размер этого TP уровня
       let levelSizeUsd = actualPositionSize * (percent / 100);
 
-      // Цена для этого уровня
-      const delta = natrStep * level;
-      const price =
-        position.side === 'long' ? position.entryPrice + delta : position.entryPrice - delta;
+      // Цена для этого уровня - используем кэш если есть, иначе рассчитываем
+      let price: number;
+      if (position.tpPriceCache.has(levelIdx)) {
+        price = position.tpPriceCache.get(levelIdx)!;
+        if (replaceExisting) {
+          console.log(
+            `[Trading] ${position.coin} TP уровень ${levelIdx}: используем сохраненную цену $${price.toFixed(4)}`
+          );
+        }
+      } else {
+        const delta = natrStep * level;
+        price = position.side === 'long' ? position.entryPrice + delta : position.entryPrice - delta;
+        position.tpPriceCache.set(levelIdx, price);
+        console.log(
+          `[Trading] ${position.coin} TP уровень ${levelIdx}: новая цена $${price.toFixed(4)} (${level} NATR)`
+        );
+      }
 
       // Распределяем levelSizeUsd по пропорциям
       const count = tpProportions.length;
       for (let i = 0; i < count; i++) {
         let sizeUsd = (levelSizeUsd * tpProportions[i]) / totalProportion;
         
-        // Проверка на "пыль" - если лимитка меньше $5, пропускаем
-        if (sizeUsd < 5) {
+        // Проверка на "пыль" - если лимитка меньше $10, пропускаем
+        if (sizeUsd < 10) {
           console.warn(
             `[Trading] ${position.coin} TP лимитка слишком мала ($${sizeUsd.toFixed(2)}), пропускаем`
           );
@@ -543,21 +561,19 @@ export class BounceTradingModule implements TradingModule {
 
     // Проверяем остаток "пыли"
     const dust = actualPositionSize - totalTpSize;
-    if (dust > 0.5) {
-      console.log(
-        `[Trading] ${position.coin} остаток пыли: $${dust.toFixed(2)}. ` +
-        (dust < 5 
-          ? 'Будет закрыт маркет-ордером при достижении первого TP' 
-          : 'ВНИМАНИЕ: большой остаток, проверьте расчеты!')
-      );
-    }
-
+    
     position.tpLimitOrders = orders;
 
     console.log(
       `[Trading] Размещено ${orders.length} TP лимитных ордеров для ${position.coin} ` +
       `(размер позиции: $${actualPositionSize.toFixed(2)}, TP объем: $${totalTpSize.toFixed(2)}, пыль: $${dust.toFixed(2)})`
     );
+    
+    if (dust >= 10) {
+      console.warn(
+        `[Trading] ⚠️ ${position.coin} остаток пыли >= $10: $${dust.toFixed(2)}! Проверьте расчеты!`
+      );
+    }
     
     if (config.logLevel === 'debug' && orders.length) {
       console.log(
@@ -777,10 +793,10 @@ export class BounceTradingModule implements TradingModule {
       return;
     }
 
-    position.anchorSide = order.side;
-    position.anchorPrice = order.price;
-    position.anchorInitialValueUsd = anchorInitialValueUsd;
-    position.anchorMinValueUsd = anchorMinValueUsd;
+      position.anchorSide = order.side;
+      position.anchorPrice = order.price;
+      position.anchorInitialValueUsd = anchorInitialValueUsd;
+      position.anchorMinValueUsd = anchorMinValueUsd;
     position.marketFilledSizeUsd = position.sizeUsd;
     position.limitFilledSizeUsd = 0;
 
@@ -1157,8 +1173,8 @@ export class BounceTradingModule implements TradingModule {
               break;
             }
 
-            // Если осталась "пыль" (< $5), закрываем маркет-ордером
-            if (position.sizeUsd > 0 && position.sizeUsd < 5) {
+            // Если осталась "пыль" (< $10), закрываем маркет-ордером
+            if (position.sizeUsd > 0 && position.sizeUsd < 10) {
               console.log(
                 `[Trading] ${position.coin} осталась пыль ($${position.sizeUsd.toFixed(2)}), закрываем маркет-ордером`
               );
