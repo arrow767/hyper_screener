@@ -480,13 +480,28 @@ export class BounceTradingModule implements TradingModule {
       }
     }
 
-    // Рассчитываем фактический размер позиции для TP (учитываем уже исполненные entry лимитки)
-    let actualPositionSize = position.marketFilledSizeUsd || 0;
-    if (position.entryLimitOrders && position.entryLimitOrders.length > 0) {
-      const filledEntry = position.entryLimitOrders
-        .filter(o => o.filled)
-        .reduce((sum, o) => sum + o.sizeUsd, 0);
-      actualPositionSize += filledEntry;
+    // Рассчитываем фактический размер позиции для TP
+    // Используем initialSizeUsd если доступен (полный размер с учетом всех исполненных входов)
+    // Если initialSizeUsd не установлен, рассчитываем из текущих данных
+    let actualPositionSize: number;
+    
+    if (position.initialSizeUsd) {
+      // Используем сохраненный полный размер
+      actualPositionSize = position.initialSizeUsd;
+    } else {
+      // Рассчитываем: market + уже исполненные entry лимитки
+      actualPositionSize = position.marketFilledSizeUsd || 0;
+      if (position.entryLimitOrders && position.entryLimitOrders.length > 0) {
+        const filledEntry = position.entryLimitOrders
+          .filter(o => o.filled)
+          .reduce((sum, o) => sum + o.sizeUsd, 0);
+        actualPositionSize += filledEntry;
+      }
+      
+      // Сохраняем для будущих пересчетов
+      if (!replaceExisting) {
+        position.initialSizeUsd = actualPositionSize;
+      }
     }
 
     // Если фактический размер слишком мал, не размещаем TP
@@ -1138,6 +1153,10 @@ export class BounceTradingModule implements TradingModule {
             if (config.tradeTpLimitProportions.length > 0) {
               const natr = this.natrService?.getNatr(position.coin);
               if (natr && natr > 0) {
+                // Обновляем initialSizeUsd для пересчета TP
+                const newTotalSize = (position.marketFilledSizeUsd || 0) + (position.limitFilledSizeUsd || 0);
+                position.initialSizeUsd = newTotalSize;
+                
                 // Если TP уже есть, заменяем их на новые с пересчитанным объемом
                 const replaceExisting = position.tpLimitOrders && position.tpLimitOrders.length > 0;
                 await this.placeLimitTpOrders(position, natr, replaceExisting);

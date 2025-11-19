@@ -67,7 +67,8 @@ export interface PositionState {
   coin: string;
   side: 'long' | 'short';
   entryPrice: number;
-  sizeUsd: number;
+  sizeUsd: number; // Текущий размер позиции (уменьшается при частичном закрытии)
+  initialSizeUsd?: number; // Начальный полный размер позиции (для расчета TP)
   openedAt: number;
   /**
    * Сторона исходной плотности (bid/ask), от которой заходили.
