@@ -179,11 +179,11 @@ export class BounceTradingModule implements TradingModule {
         .filter((o) => !o.filled && !o.cancelled)
         .reduce((sum, o) => sum + o.sizeUsd, 0);
 
-      // Допускаем расхождение до 5% (из-за округления, пыли)
+      // Допускаем расхождение до 3% (из-за округления, пыли)
       const sizeDiff = Math.abs(tpTotalSize - actualSize);
       const sizePercent = (sizeDiff / actualSize) * 100;
 
-      if (sizePercent > 5 && config.tradeTpLimitProportions.length > 0) {
+      if (sizePercent > 3 && config.tradeTpLimitProportions.length > 0) {
         fileLogger.warn(`${position.coin} TP reconciliation: расхождение ${sizePercent.toFixed(1)}%`, {
           coin: position.coin,
           actualSize: actualSize.toFixed(2),
@@ -1433,6 +1433,52 @@ export class BounceTradingModule implements TradingModule {
               );
               positionsToClose.push({ position, reason: 'tp_dust_cleanup' });
               break;
+            }
+          }
+        }
+      }
+
+      // ========================================
+      // НЕМЕДЛЕННАЯ ПРОВЕРКА TP RECONCILIATION
+      // ========================================
+      // Проверяем соответствие TP лимиток фактическому размеру позиции
+      // Это дополнительная проверка помимо периодической (каждые 4s)
+      if (position.tpLimitOrders && position.tpLimitOrders.length > 0 && config.tradeTpLimitProportions.length > 0) {
+        const actualSize = (position.marketFilledSizeUsd || 0) + (position.limitFilledSizeUsd || 0);
+        
+        // Рассчитываем суммарный объём активных TP лимиток
+        const tpTotalSize = position.tpLimitOrders
+          .filter((o) => !o.filled && !o.cancelled)
+          .reduce((sum, o) => sum + o.sizeUsd, 0);
+
+        // Если расхождение > 10% - немедленно пересчитываем
+        const sizeDiff = Math.abs(tpTotalSize - actualSize);
+        const sizePercent = actualSize > 0 ? (sizeDiff / actualSize) * 100 : 0;
+
+        if (sizePercent > 10) {
+          fileLogger.warn(`${position.coin} INSTANT TP reconciliation: расхождение ${sizePercent.toFixed(1)}%`, {
+            coin: position.coin,
+            actualSize: actualSize.toFixed(2),
+            tpTotalSize: tpTotalSize.toFixed(2),
+            sizeDiff: sizeDiff.toFixed(2),
+          });
+
+          console.warn(
+            `[Trading] ⚠️ ${position.coin} КРИТИЧЕСКОЕ расхождение TP: actualSize=$${actualSize.toFixed(2)}, ` +
+            `tpTotalSize=$${tpTotalSize.toFixed(2)}, расхождение=${sizePercent.toFixed(1)}% - НЕМЕДЛЕННЫЙ ПЕРЕСЧЁТ`
+          );
+
+          // Пересчитываем TP немедленно
+          const natr = this.natrService?.getNatr(position.coin);
+          if (natr && natr > 0) {
+            try {
+              await this.placeLimitTpOrders(position, natr, true, false); // replace, не пересчитываем цены
+              fileLogger.info(`${position.coin} INSTANT TP reconciliation успешно`, { coin: position.coin });
+            } catch (err: any) {
+              fileLogger.error(`${position.coin} ошибка при INSTANT TP reconciliation`, {
+                coin: position.coin,
+                error: err.message,
+              });
             }
           }
         }
