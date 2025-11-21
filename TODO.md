@@ -304,6 +304,44 @@
   - Порог задавать в конфиге, например `MAX_WINS_PER_ANCHOR=5`.
   - **Реализовано**: Правило `too_many_wins_on_anchor` в `policy.example.yaml`, конфиг `POLICY_MAX_WINS_PER_ANCHOR`.
 
+- **TP объёмы в лотах (контрактах) вместо USD для устранения пыли**: ⏳ TODO
+  - **Проблема**: При расчёте TP лимиток в USD остаётся пыль (несколько центов) из-за округлений и конвертации `USD → lots → USD`.
+  - **Решение**:
+    - При открытии позиции сохранять **фактический размер в лотах** (контрактах), а не только в USD:
+      - `position.sizeContracts = actualFilledContracts` (получить из exchange API или рассчитать).
+    - При расчёте TP лимиток:
+      - **Сначала** распределять `position.sizeContracts` по пропорциям (`TRADE_TP_PERCENTS` и `TRADE_TP_LIMIT_PROPORTIONS`).
+      - **Округлять** каждый TP объём до целого числа контрактов (учитывая `LOT_SIZE` биржи).
+      - **Затем** конвертировать обратно в USD для логирования: `sizeUsd = contracts * price`.
+    - Обработка остатка (пыли):
+      - Если после распределения остаётся `< 1 LOT_SIZE` → либо игнорировать, либо добавить к последнему TP.
+      - Если остаток `>= 1 LOT_SIZE` но `< TRADE_MIN_TP_USD` → закрыть маркет-ордером.
+  - **Детали реализации**:
+    - В `PositionState` добавить поле `sizeContracts?: number`.
+    - В `placeLimitTpOrders()`:
+      - Получить `position.sizeContracts` или рассчитать из `position.sizeUsd / position.entryPrice`.
+      - Для каждого TP уровня:
+        ```typescript
+        const levelPercent = config.tradeTpPercents[levelIdx] / 100;
+        const levelContracts = Math.floor(position.sizeContracts * levelPercent);
+        const proportions = config.tradeTpLimitProportions;
+        
+        for (let i = 0; i < proportions.length; i++) {
+          const orderContracts = Math.floor(levelContracts * proportions[i] / totalProportion);
+          if (orderContracts >= minLotSize) {
+            const orderSizeUsd = orderContracts * tpPrice; // для логирования
+            await placeLimitOrder(..., orderContracts, ...);
+          }
+        }
+        ```
+      - Подсчитать пыль: `dustContracts = position.sizeContracts - totalTpContracts`.
+      - Если `dustContracts >= minLotSize && dustContracts * price >= 10` → добавить к последнему TP или создать отдельный TP.
+      - Если `dustContracts < minLotSize` → игнорировать (слишком мало для ордера).
+  - **Тестирование**:
+    - Убедиться что `sum(tpContracts) = position.sizeContracts` (или отличается максимум на `minLotSize`).
+    - Проверить на разных монетах с разными `LOT_SIZE` (BTC: 0.001, ETH: 0.01, SHIB: 1000).
+    - Проверить что пыль не накапливается в позиции.
+
 - **Примеры правил (реализовано в `policy.example.yaml`)**: ✅
 
 См. файл `policy.example.yaml` для полного списка правил с комментариями. Основные правила:
