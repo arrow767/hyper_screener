@@ -174,9 +174,9 @@ export class BounceTradingModule implements TradingModule {
       // Рассчитываем фактический размер позиции (market + limit filled)
       const actualSize = (position.marketFilledSizeUsd || 0) + (position.limitFilledSizeUsd || 0);
       
-      // Рассчитываем суммарный объём активных TP лимиток
+      // Рассчитываем суммарный объём активных TP лимиток (не filled и не cancelled)
       const tpTotalSize = position.tpLimitOrders
-        .filter((o) => o.status === 'open')
+        .filter((o) => !o.filled && !o.cancelled)
         .reduce((sum, o) => sum + o.sizeUsd, 0);
 
       // Допускаем расхождение до 5% (из-за округления, пыли)
