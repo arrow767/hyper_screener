@@ -15,6 +15,7 @@ import { TradeLogger } from './tradeLogger';
 import { ContextFeaturesService, ContextFeatures } from './contextFeatures';
 import { AnchorMemory, AnchorId, AnchorStats } from './anchorMemory';
 import { PositionPolicy, PolicyDecision } from './positionPolicy';
+import { fileLogger } from '../utils/fileLogger';
 
 class BasicRiskManager implements RiskManager {
   canOpenPosition(signal: TradeSignal, context: TradingContext, openPositions: PositionState[]): boolean {
@@ -145,11 +146,71 @@ export class BounceTradingModule implements TradingModule {
     this.pnlCheckInterval = setInterval(() => {
       this.checkPnlAndEmergencyClose().catch((err) => {
         console.error('[Trading] Ошибка при проверке PnL:', err);
+        fileLogger.error('Ошибка при проверке PnL', { error: err.message, stack: err.stack });
       });
       
       // Периодически очищаем старые записи о заявках (анти-спуфинг)
       this.cleanupOldOrderTracking();
+
+      // Периодически проверяем и перерасчитываем TP лимитки (reconciliation)
+      this.reconcileTpOrders().catch((err) => {
+        console.error('[Trading] Ошибка при reconcileTpOrders:', err);
+        fileLogger.error('Ошибка при reconcileTpOrders', { error: err.message, stack: err.stack });
+      });
     }, intervalMs);
+  }
+
+  /**
+   * Reconciliation: проверяем соответствие TP лимиток актуальному размеру позиции.
+   * Если размер изменился (entry limits частично исполнены), пересчитываем TP.
+   */
+  private async reconcileTpOrders(): Promise<void> {
+    for (const position of this.openPositions) {
+      // Пропускаем если нет TP лимиток
+      if (!position.tpLimitOrders || position.tpLimitOrders.length === 0) {
+        continue;
+      }
+
+      // Рассчитываем фактический размер позиции (market + limit filled)
+      const actualSize = (position.marketFilledSizeUsd || 0) + (position.limitFilledSizeUsd || 0);
+      
+      // Рассчитываем суммарный объём активных TP лимиток
+      const tpTotalSize = position.tpLimitOrders
+        .filter((o) => o.status === 'open')
+        .reduce((sum, o) => sum + o.sizeUsd, 0);
+
+      // Допускаем расхождение до 5% (из-за округления, пыли)
+      const sizeDiff = Math.abs(tpTotalSize - actualSize);
+      const sizePercent = (sizeDiff / actualSize) * 100;
+
+      if (sizePercent > 5 && config.tradeTpLimitProportions.length > 0) {
+        fileLogger.warn(`${position.coin} TP reconciliation: расхождение ${sizePercent.toFixed(1)}%`, {
+          coin: position.coin,
+          actualSize: actualSize.toFixed(2),
+          tpTotalSize: tpTotalSize.toFixed(2),
+          sizeDiff: sizeDiff.toFixed(2),
+        });
+
+        console.log(
+          `[Trading] ${position.coin} пересчёт TP лимиток: actualSize=$${actualSize.toFixed(2)}, ` +
+          `tpTotalSize=$${tpTotalSize.toFixed(2)}, расхождение=${sizePercent.toFixed(1)}%`
+        );
+
+        // Пересчитываем TP
+        const natr = this.natrService?.getNatr(position.coin);
+        if (natr && natr > 0) {
+          try {
+            await this.placeLimitTpOrders(position, natr, true, false); // replace, не пересчитываем цены
+            fileLogger.info(`${position.coin} TP reconciliation успешно`, { coin: position.coin });
+          } catch (err: any) {
+            fileLogger.error(`${position.coin} ошибка при TP reconciliation`, {
+              coin: position.coin,
+              error: err.message,
+            });
+          }
+        }
+      }
+    }
   }
 
   /**
@@ -741,29 +802,49 @@ export class BounceTradingModule implements TradingModule {
       }
       
       // OK, заявка стабильна достаточно долго
-      console.log(
-        `[Trading] ✅ ${order.coin} заявка стабильна ${lifetime}мс, открываем позицию`
-      );
+      fileLogger.info(`${order.coin} заявка стабильна ${lifetime}мс`, {
+        coin: order.coin,
+        side: order.side,
+        price: order.price,
+        valueUsd: order.valueUsd,
+        lifetimeMs: lifetime,
+      });
     }
 
     // Если по монете уже есть in-flight запрос на открытие позиции, не лезем ещё раз
     if (this.pendingCoins.has(coinKey)) {
-      if (config.logLevel === 'debug') {
-        console.log(`[Risk] pending openPosition for ${coinKey}, skip new signal`);
-      }
+      fileLogger.warn(`${coinKey} уже в процессе открытия (pendingCoins), skip`, {
+        coin: coinKey,
+        pendingCoins: Array.from(this.pendingCoins),
+      });
       return;
     }
 
     // Если в памяти уже есть позиция по этой монете — не добавляем (даже если sizeUsd меньше TRADE_POSITION_SIZE_USD)
-    if (this.openPositions.some((p) => p.coin.toUpperCase() === coinKey)) {
-      if (config.logLevel === 'debug') {
-        console.log(`[Risk] position for ${coinKey} already exists in openPositions, skip new signal`);
-      }
+    const existingPosition = this.openPositions.find((p) => p.coin.toUpperCase() === coinKey);
+    if (existingPosition) {
+      fileLogger.warn(`${coinKey} позиция уже открыта, skip`, {
+        coin: coinKey,
+        positionId: existingPosition.id,
+        sizeUsd: existingPosition.sizeUsd,
+        entryPrice: existingPosition.entryPrice,
+      });
       return;
     }
 
     // Рассчитываем размер позиции с учётом риска и NATR
     const targetPositionSizeUsd = this.calculatePositionSize(order.coin, order.price);
+
+    if (targetPositionSizeUsd <= 0) {
+      fileLogger.error(`${order.coin} targetPositionSizeUsd <= 0, skip entry`, {
+        coin: order.coin,
+        targetPositionSizeUsd,
+        natr: this.natrService?.getNatr(order.coin),
+        maxRiskPerTrade: config.tradeMaxRiskPerTrade,
+        positionSizeUsd: config.tradePositionSizeUsd,
+      });
+      return;
+    }
 
     const signal: TradeSignal = {
       coin: order.coin,
@@ -775,15 +856,36 @@ export class BounceTradingModule implements TradingModule {
     };
 
     if (!this.riskManager.canOpenPosition(signal, this.context, this.openPositions)) {
+      fileLogger.warn(`${order.coin} RiskManager запретил открытие`, {
+        coin: order.coin,
+        openPositionsCount: this.openPositions.length,
+        maxOpenPositions: this.context.maxOpenPositions,
+      });
       return;
     }
 
+    // LOCK: добавляем монету в pendingCoins ДО попытки открытия
     this.pendingCoins.add(coinKey);
+    fileLogger.info(`${order.coin} ✅ все проверки пройдены, открываем позицию`, {
+      coin: order.coin,
+      side,
+      targetPositionSizeUsd,
+      entryMode: config.tradeEntryMode,
+      referencePrice: order.price,
+    });
 
     try {
       await this.executeEntry(signal, order);
+    } catch (err: any) {
+      fileLogger.error(`${order.coin} ❌ ошибка при открытии позиции`, {
+        coin: order.coin,
+        error: err.message,
+        stack: err.stack,
+      });
+      console.error(`[Trading] ❌ ${order.coin} ошибка при открытии позиции:`, err);
     } finally {
       this.pendingCoins.delete(coinKey);
+      fileLogger.debug(`${order.coin} UNLOCK pendingCoins`, { coin: coinKey });
     }
   }
 
@@ -791,11 +893,22 @@ export class BounceTradingModule implements TradingModule {
    * Исполнение входа в позицию в зависимости от режима (MARKET / LIMIT / MIXED).
    */
   private async executeEntry(signal: TradeSignal, order: LargeOrder): Promise<void> {
+    fileLogger.info(`${order.coin} executeEntry START`, {
+      coin: order.coin,
+      side: signal.side,
+      targetSizeUsd: signal.targetPositionSizeUsd,
+      entryMode: config.tradeEntryMode,
+    });
+
     const natr = this.natrService?.getNatr(order.coin);
     if (!natr || natr <= 0) {
-      console.warn(`[Trading] NATR для ${order.coin} недоступен или <= 0, skip entry`);
-        return;
-      }
+      const msg = `NATR для ${order.coin} недоступен или <= 0, skip entry`;
+      fileLogger.error(msg, { coin: order.coin, natr });
+      console.warn(`[Trading] ${msg}`);
+      return;
+    }
+
+    fileLogger.debug(`${order.coin} NATR=${natr.toFixed(4)}`, { coin: order.coin, natr });
 
     const anchorInitialValueUsd = order.valueUsd;
     const anchorMinValueUsd = Math.max(
@@ -807,16 +920,23 @@ export class BounceTradingModule implements TradingModule {
 
     if (entryMode === 'MARKET') {
       // Только рыночный вход
+      fileLogger.info(`${order.coin} executeMarketEntry`, { coin: order.coin });
       await this.executeMarketEntry(signal, order, natr, anchorInitialValueUsd, anchorMinValueUsd);
     } else if (entryMode === 'LIMIT') {
       // Только лимитный вход
+      fileLogger.info(`${order.coin} executeLimitEntry`, { coin: order.coin });
       await this.executeLimitEntry(signal, order, natr, anchorInitialValueUsd, anchorMinValueUsd);
     } else if (entryMode === 'MIXED') {
       // Комбинированный вход: часть по рынку, часть лимитками
+      fileLogger.info(`${order.coin} executeMixedEntry`, { coin: order.coin });
       await this.executeMixedEntry(signal, order, natr, anchorInitialValueUsd, anchorMinValueUsd);
     } else {
-      console.warn(`[Trading] Unknown entry mode: ${entryMode}, skip entry`);
+      const msg = `Unknown entry mode: ${entryMode}, skip entry`;
+      fileLogger.error(msg, { coin: order.coin, entryMode });
+      console.warn(`[Trading] ${msg}`);
     }
+
+    fileLogger.info(`${order.coin} executeEntry END`, { coin: order.coin });
   }
 
   /**
@@ -898,25 +1018,58 @@ export class BounceTradingModule implements TradingModule {
     const limitPercent = config.tradeEntryLimitPercent;
     const total = marketPercent + limitPercent;
 
+    fileLogger.debug(`${order.coin} executeMixedEntry params`, {
+      coin: order.coin,
+      marketPercent,
+      limitPercent,
+      total,
+      targetSize: signal.targetPositionSizeUsd,
+    });
+
     if (total <= 0) {
-      console.warn('[Trading] MIXED mode: marketPercent + limitPercent <= 0, skip entry');
+      const msg = 'MIXED mode: marketPercent + limitPercent <= 0, skip entry';
+      fileLogger.error(`${order.coin} ${msg}`, { coin: order.coin, marketPercent, limitPercent });
+      console.warn(`[Trading] ${msg}`);
       return;
     }
 
     const marketSizeUsd = (signal.targetPositionSizeUsd * marketPercent) / total;
     const limitSizeUsd = (signal.targetPositionSizeUsd * limitPercent) / total;
 
+    fileLogger.info(`${order.coin} MIXED entry: market=$${marketSizeUsd.toFixed(2)}, limit=$${limitSizeUsd.toFixed(2)}`, {
+      coin: order.coin,
+      marketSizeUsd,
+      limitSizeUsd,
+    });
+
     // Открываем рыночную часть
     const marketSignal: TradeSignal = { ...signal, targetPositionSizeUsd: marketSizeUsd };
+    fileLogger.debug(`${order.coin} вызываем engine.openPosition для market части`, {
+      coin: order.coin,
+      sizeUsd: marketSizeUsd,
+    });
+
     const position = await this.engine.openPosition(marketSignal);
     if (!position) {
+      fileLogger.error(`${order.coin} engine.openPosition вернул null/undefined`, {
+        coin: order.coin,
+        signal: marketSignal,
+      });
+      console.error(`[Trading] ${order.coin} engine.openPosition вернул null`);
       return;
     }
 
-      position.anchorSide = order.side;
-      position.anchorPrice = order.price;
-      position.anchorInitialValueUsd = anchorInitialValueUsd;
-      position.anchorMinValueUsd = anchorMinValueUsd;
+    fileLogger.info(`${order.coin} ✅ market позиция открыта`, {
+      coin: order.coin,
+      positionId: position.id,
+      entryPrice: position.entryPrice,
+      sizeUsd: position.sizeUsd,
+    });
+
+    position.anchorSide = order.side;
+    position.anchorPrice = order.price;
+    position.anchorInitialValueUsd = anchorInitialValueUsd;
+    position.anchorMinValueUsd = anchorMinValueUsd;
     position.marketFilledSizeUsd = position.sizeUsd;
     position.limitFilledSizeUsd = 0;
 
@@ -925,19 +1078,40 @@ export class BounceTradingModule implements TradingModule {
 
     // Размещаем лимитные ордера на вход
     if (limitSizeUsd > 0) {
+      fileLogger.debug(`${order.coin} размещаем entry limits, sizeUsd=$${limitSizeUsd.toFixed(2)}`, {
+        coin: order.coin,
+        limitSizeUsd,
+      });
       await this.placeLimitEntryOrders(position, order.price, limitSizeUsd, natr);
+      fileLogger.info(`${order.coin} entry limits размещены: ${position.entryLimitOrders?.length || 0} ордеров`, {
+        coin: order.coin,
+        ordersCount: position.entryLimitOrders?.length || 0,
+      });
     }
 
     // Размещаем TP лимитками СРАЗУ на market filled размер (если настроено)
     // Когда entry limits исполнятся, TP пересчитаются с новой средней ценой
     if (config.tradeTpLimitProportions.length > 0) {
+      fileLogger.debug(`${order.coin} размещаем TP limits`, { coin: order.coin });
       await this.placeLimitTpOrders(position, natr);
+      fileLogger.info(`${order.coin} TP limits размещены: ${position.tpLimitOrders?.length || 0} ордеров`, {
+        coin: order.coin,
+        ordersCount: position.tpLimitOrders?.length || 0,
+      });
     } else {
       // Старая логика TP по NATR
+      fileLogger.debug(`${order.coin} используем старую логику TP (market orders при достижении цены)`, {
+        coin: order.coin,
+      });
       this.setupTpTargets(position, natr);
     }
 
     this.openPositions.push(position);
+    fileLogger.info(`${order.coin} ✅ позиция добавлена в openPositions (всего ${this.openPositions.length})`, {
+      coin: order.coin,
+      positionId: position.id,
+      openPositionsCount: this.openPositions.length,
+    });
   }
 
   /**

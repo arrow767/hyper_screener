@@ -4,6 +4,8 @@ dist/
 *.log
 .DS_Store
 trade_logs/
+logs/
 data/
 policy.yaml
+
 
