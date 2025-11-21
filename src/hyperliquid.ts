@@ -70,15 +70,47 @@ export class HyperliquidClient {
           }
         });
 
-        this.ws.on('close', () => {
-          console.log('[Hyperliquid] WebSocket disconnected');
+        this.ws.on('pong', () => {
+          // Сервер ответил на ping - соединение живое
+          if (config.logLevel === 'debug') {
+            console.log('[Hyperliquid] Pong received');
+          }
+        });
+
+        this.ws.on('close', (code, reason) => {
+          const reasonStr = reason.toString() || 'no reason provided';
+          console.log(`[Hyperliquid] WebSocket disconnected: code=${code}, reason=${reasonStr}`);
           this.isConnected = false;
           this.stopPing();
+          
+          // Логируем код закрытия для диагностики
+          if (code === 1006) {
+            console.warn('[Hyperliquid] Abnormal closure (1006) - likely network timeout or server restart');
+          } else if (code === 1000) {
+            console.log('[Hyperliquid] Normal closure (1000)');
+          } else if (code === 1001) {
+            console.warn('[Hyperliquid] Going away (1001) - server shutting down');
+          } else if (code === 1002) {
+            console.error('[Hyperliquid] Protocol error (1002)');
+          } else if (code === 1003) {
+            console.error('[Hyperliquid] Unsupported data (1003)');
+          }
+          
           this.handleReconnect();
         });
 
-        this.ws.on('error', (error) => {
-          console.error('[Hyperliquid] WebSocket error:', error);
+        this.ws.on('error', (error: any) => {
+          // Логируем ошибку с деталями
+          const errorMsg = error.message || 'Unknown error';
+          const errorCode = error.code || 'NO_CODE';
+          
+          console.error(`[Hyperliquid] WebSocket error: ${errorMsg} (code: ${errorCode})`);
+          
+          // Специальная обработка для WS_ERR_INVALID_CLOSE_CODE
+          if (errorCode === 'WS_ERR_INVALID_CLOSE_CODE') {
+            console.warn('[Hyperliquid] Invalid close code - это нормально при network timeout, reconnect...');
+          }
+          
           if (!this.isConnected) {
             reject(error);
           }
@@ -106,23 +138,28 @@ export class HyperliquidClient {
 
   private handleReconnect(): void {
     if (this.reconnectAttempts >= this.maxReconnectAttempts) {
-      console.error('[Hyperliquid] Max reconnection attempts reached');
+      console.error('[Hyperliquid] Max reconnection attempts reached, giving up');
       return;
     }
 
     this.reconnectAttempts++;
-    const delay = this.reconnectDelay * Math.pow(2, this.reconnectAttempts - 1);
+    // Exponential backoff: 5s, 10s, 20s, 40s, 80s...
+    const delay = Math.min(this.reconnectDelay * Math.pow(2, this.reconnectAttempts - 1), 60000); // max 60s
 
     console.log(
-      `[Hyperliquid] Reconnecting in ${delay}ms (attempt ${this.reconnectAttempts}/${this.maxReconnectAttempts})`
+      `[Hyperliquid] Reconnecting in ${(delay / 1000).toFixed(1)}s ` +
+      `(attempt ${this.reconnectAttempts}/${this.maxReconnectAttempts})`
     );
 
     setTimeout(async () => {
       try {
+        console.log('[Hyperliquid] Attempting to reconnect...');
         await this.connect();
+        console.log(`[Hyperliquid] Reconnected successfully! Restoring ${this.subscriptions.size} subscriptions...`);
         this.resubscribeAll();
       } catch (error) {
         console.error('[Hyperliquid] Reconnection failed:', error);
+        // handleReconnect вызовется автоматически из on('close')
       }
     }, delay);
   }
