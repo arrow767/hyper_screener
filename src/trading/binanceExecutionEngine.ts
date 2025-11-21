@@ -178,6 +178,48 @@ export class BinanceExecutionEngine implements ExecutionEngine {
   }
 
   /**
+   * Получить LOT_SIZE для символа (минимальный шаг количества).
+   * Пример: BTC = 0.001, ETH = 0.01, SHIB = 1000
+   */
+  private async getLotSize(symbol: string): Promise<number> {
+    await this.ensureExchangeInfo();
+    
+    if (!this.exchangeInfoCache) {
+      return 0.001; // default
+    }
+
+    const info = this.exchangeInfoCache.symbols?.find((s: any) => s.symbol === symbol);
+    if (!info) {
+      return 0.001;
+    }
+
+    const lotSizeFilter = info.filters?.find((f: any) => f.filterType === 'LOT_SIZE');
+    if (!lotSizeFilter) {
+      return 0.001;
+    }
+
+    const stepSize = parseFloat(lotSizeFilter.stepSize);
+    return isFinite(stepSize) && stepSize > 0 ? stepSize : 0.001;
+  }
+
+  /**
+   * Нормализовать количество (contracts) к валидному значению согласно LOT_SIZE биржи.
+   * Округляет вниз до ближайшего кратного LOT_SIZE.
+   */
+  private async normalizeQuantity(symbol: string, quantityRaw: number): Promise<number> {
+    const lotSize = await this.getLotSize(symbol);
+    
+    // Округляем вниз до ближайшего кратного lotSize
+    const quantity = Math.floor(quantityRaw / lotSize) * lotSize;
+    
+    // Определяем количество знаков после запятой для lotSize
+    const lotStr = lotSize.toString();
+    const decimals = lotStr.includes('.') ? lotStr.split('.')[1].length : 0;
+    
+    return Number(quantity.toFixed(decimals));
+  }
+
+  /**
    * Получить реальные trades (исполнения) для ордера с Binance.
    * Возвращает массив trades с ценами, комиссиями и т.д.
    */
@@ -259,6 +301,7 @@ export class BinanceExecutionEngine implements ExecutionEngine {
       // Рассчитываем weighted average entry price из реальных trades
       let actualEntryPrice = price;
       let actualSizeUsd = signal.targetPositionSizeUsd;
+      let actualSizeContracts = quantity; // Фактическое количество исполненное
       
       if (entryTrades.length > 0) {
         let totalQty = 0;
@@ -274,11 +317,14 @@ export class BinanceExecutionEngine implements ExecutionEngine {
         if (totalQty > 0) {
           actualEntryPrice = totalCost / totalQty;
           actualSizeUsd = totalCost;
+          actualSizeContracts = totalQty; // Реальное количество из trades
         }
 
         console.log(
           `[BinanceExecution] Получено ${entryTrades.length} реальных trades для entry. ` +
-          `Weighted avg price: $${actualEntryPrice.toFixed(4)}, actual size: $${actualSizeUsd.toFixed(2)}`
+          `Weighted avg price: $${actualEntryPrice.toFixed(4)}, ` +
+          `actual size: $${actualSizeUsd.toFixed(2)}, ` +
+          `actual contracts: ${actualSizeContracts}`
         );
       }
 
@@ -288,6 +334,7 @@ export class BinanceExecutionEngine implements ExecutionEngine {
         side: signal.side,
         entryPrice: actualEntryPrice,
         sizeUsd: actualSizeUsd,
+        sizeContracts: actualSizeContracts, // ✅ Сохраняем размер в контрактах
         openedAt: Date.now(),
         entryTrades,
       };
@@ -317,9 +364,18 @@ export class BinanceExecutionEngine implements ExecutionEngine {
     // Для закрытия позиции по маркету отправляем ордер в противоположную сторону
     const side = position.side === 'long' ? 'SELL' : 'BUY';
 
-    const price = position.entryPrice;
-    const qtyRaw = position.sizeUsd / price;
-    const quantity = await this.normalizeQuantity(symbol, qtyRaw);
+    // Используем sizeContracts если доступен, иначе рассчитываем из USD
+    let quantity: number;
+    if (position.sizeContracts && position.sizeContracts > 0) {
+      // Уже знаем точное количество контрактов
+      quantity = await this.normalizeQuantity(symbol, position.sizeContracts);
+    } else {
+      // Fallback: рассчитываем из USD
+      const price = position.entryPrice;
+      const qtyRaw = position.sizeUsd / price;
+      quantity = await this.normalizeQuantity(symbol, qtyRaw);
+    }
+    
     if (quantity <= 0) {
       return;
     }
@@ -376,7 +432,8 @@ export class BinanceExecutionEngine implements ExecutionEngine {
     side: 'buy' | 'sell',
     price: number,
     sizeUsd: number,
-    purpose: 'entry' | 'tp'
+    purpose: 'entry' | 'tp',
+    contracts?: number // ✅ Опциональный параметр - точное количество контрактов
   ): Promise<LimitOrderState | null> {
     if (!this.isLive()) {
       console.warn(
@@ -393,8 +450,15 @@ export class BinanceExecutionEngine implements ExecutionEngine {
       return null;
     }
 
-    const qtyRaw = sizeUsd / price;
-    const quantity = await this.normalizeQuantity(symbol, qtyRaw);
+    // Используем переданные contracts если есть, иначе рассчитываем из USD
+    let quantity: number;
+    if (contracts !== undefined && contracts > 0) {
+      quantity = await this.normalizeQuantity(symbol, contracts);
+    } else {
+      const qtyRaw = sizeUsd / price;
+      quantity = await this.normalizeQuantity(symbol, qtyRaw);
+    }
+    
     if (quantity <= 0) {
       return null;
     }
@@ -403,7 +467,8 @@ export class BinanceExecutionEngine implements ExecutionEngine {
     const normalizedPrice = await this.normalizePrice(symbol, price);
 
     console.log(
-      `[BinanceExecution] Sending LIMIT order: ${binanceSide} ${symbol} qty=${quantity} @ $${normalizedPrice.toFixed(4)} (purpose=${purpose})`
+      `[BinanceExecution] Sending LIMIT order: ${binanceSide} ${symbol} qty=${quantity} @ $${normalizedPrice.toFixed(4)} ` +
+      `(purpose=${purpose}${contracts ? `, contracts=${contracts}` : ''})`
     );
 
     try {
@@ -428,6 +493,7 @@ export class BinanceExecutionEngine implements ExecutionEngine {
         coin,
         price: normalizedPrice,
         sizeUsd,
+        contracts: quantity, // ✅ Сохраняем фактическое количество контрактов
         side,
         purpose,
         placedAt: Date.now(),
@@ -437,7 +503,7 @@ export class BinanceExecutionEngine implements ExecutionEngine {
 
       console.log(
         `[BinanceExecution] Лимитный ордер размещён: ${side.toUpperCase()} ${coin} ` +
-          `sizeUsd=${sizeUsd.toFixed(2)} @ $${normalizedPrice.toFixed(4)} (orderId=${resp.orderId})`
+          `qty=${quantity} contracts ($${sizeUsd.toFixed(2)}) @ $${normalizedPrice.toFixed(4)} (orderId=${resp.orderId})`
       );
 
       return order;

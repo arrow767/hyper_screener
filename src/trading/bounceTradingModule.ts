@@ -547,34 +547,64 @@ export class BounceTradingModule implements TradingModule {
       }
     }
 
-    // Рассчитываем фактический размер позиции для TP
-    // Используем initialSizeUsd если доступен (полный размер с учетом всех исполненных входов)
-    // Если initialSizeUsd не установлен, рассчитываем из текущих данных
-    let actualPositionSize: number;
+    // ====================================================================
+    // РАСЧЁТ TP В КОНТРАКТАХ (БЕЗ ПЫЛИ)
+    // ====================================================================
+    // Рассчитываем фактический размер позиции ДЛЯ TP
+    // Используем initialSizeContracts если доступен (для устранения пыли)
+    let actualPositionSizeContracts: number | undefined;
+    let actualPositionSizeUsd: number;
     
-    if (position.initialSizeUsd) {
-      // Используем сохраненный полный размер
-      actualPositionSize = position.initialSizeUsd;
-    } else {
-      // Рассчитываем: market + уже исполненные entry лимитки
-      actualPositionSize = position.marketFilledSizeUsd || 0;
-      if (position.entryLimitOrders && position.entryLimitOrders.length > 0) {
-        const filledEntry = position.entryLimitOrders
-          .filter(o => o.filled)
-          .reduce((sum, o) => sum + o.sizeUsd, 0);
-        actualPositionSize += filledEntry;
-      }
+    if (position.initialSizeContracts && position.initialSizeContracts > 0) {
+      // Используем сохраненный размер в контрактах
+      actualPositionSizeContracts = position.initialSizeContracts;
+      actualPositionSizeUsd = position.initialSizeUsd || actualPositionSizeContracts * position.entryPrice;
+    } else if (position.sizeContracts && position.sizeContracts > 0) {
+      // Используем текущий размер в контрактах
+      actualPositionSizeContracts = position.sizeContracts;
+      actualPositionSizeUsd = position.sizeUsd;
       
       // Сохраняем для будущих пересчетов
       if (!replaceExisting) {
-        position.initialSizeUsd = actualPositionSize;
+        position.initialSizeContracts = actualPositionSizeContracts;
+        position.initialSizeUsd = actualPositionSizeUsd;
       }
+    } else {
+      // Fallback: рассчитываем в USD (старая логика)
+      if (position.initialSizeUsd) {
+        actualPositionSizeUsd = position.initialSizeUsd;
+      } else {
+        // Рассчитываем: market + уже исполненные entry лимитки
+        actualPositionSizeUsd = position.marketFilledSizeUsd || 0;
+        if (position.entryLimitOrders && position.entryLimitOrders.length > 0) {
+          const filledEntry = position.entryLimitOrders
+            .filter(o => o.filled)
+            .reduce((sum, o) => sum + o.sizeUsd, 0);
+          actualPositionSizeUsd += filledEntry;
+        }
+        
+        // Сохраняем для будущих пересчетов
+        if (!replaceExisting) {
+          position.initialSizeUsd = actualPositionSizeUsd;
+        }
+      }
+      
+      // Рассчитываем contracts из USD
+      actualPositionSizeContracts = actualPositionSizeUsd / position.entryPrice;
     }
 
     // Если фактический размер слишком мал, не размещаем TP
-    if (actualPositionSize < 10) {
-      console.warn(`[Trading] Размер позиции ${position.coin} слишком мал ($${actualPositionSize.toFixed(2)}), TP лимитки не размещаются`);
+    if (actualPositionSizeUsd < 10) {
+      console.warn(`[Trading] Размер позиции ${position.coin} слишком мал ($${actualPositionSizeUsd.toFixed(2)}), TP лимитки не размещаются`);
       return;
+    }
+
+    if (config.logLevel === 'debug') {
+      console.log(
+        `[Trading] ${position.coin} TP расчёт: ` +
+        `actualSizeContracts=${actualPositionSizeContracts?.toFixed(4)}, ` +
+        `actualSizeUsd=$${actualPositionSizeUsd.toFixed(2)}`
+      );
     }
 
     const tpProportions = config.tradeTpLimitProportions;
@@ -606,20 +636,20 @@ export class BounceTradingModule implements TradingModule {
     const side = position.side === 'long' ? 'sell' : 'buy';
     const orders: LimitOrderState[] = [];
     
-    let totalTpSize = 0;
+    let totalTpSizeUsd = 0;
+    let totalTpContracts = 0;
 
     // Инициализируем кэш цен TP если его нет
     if (!position.tpPriceCache) {
       position.tpPriceCache = new Map();
     }
 
-    // Размещаем TP лимитки на каждом уровне из tradeTpNatrLevels
+    // ====================================================================
+    // РАЗМЕЩАЕМ TP ЛИМИТКИ В КОНТРАКТАХ (ДЛЯ УСТРАНЕНИЯ ПЫЛИ)
+    // ====================================================================
     for (let levelIdx = 0; levelIdx < config.tradeTpNatrLevels.length; levelIdx++) {
       const level = config.tradeTpNatrLevels[levelIdx];
       const percent = config.tradeTpPercents[levelIdx];
-
-      // Размер этого TP уровня
-      let levelSizeUsd = actualPositionSize * (percent / 100);
 
       // Цена для этого уровня - используем кэш если есть, иначе рассчитываем
       let price: number;
@@ -640,41 +670,114 @@ export class BounceTradingModule implements TradingModule {
         );
       }
 
-      // Распределяем levelSizeUsd по пропорциям
-      const count = tpProportions.length;
-      for (let i = 0; i < count; i++) {
-        let sizeUsd = (levelSizeUsd * tpProportions[i]) / totalProportion;
+      // РАСЧЁТ В КОНТРАКТАХ (если доступны)
+      if (actualPositionSizeContracts) {
+        // Размер этого TP уровня в контрактах
+        const levelContracts = actualPositionSizeContracts * (percent / 100);
         
-        // Проверка на "пыль" - если лимитка меньше $10, пропускаем
-        if (sizeUsd < 10) {
-          console.warn(
-            `[Trading] ${position.coin} TP лимитка слишком мала ($${sizeUsd.toFixed(2)}), пропускаем`
+        // Распределяем levelContracts по пропорциям
+        const count = tpProportions.length;
+        for (let i = 0; i < count; i++) {
+          const orderContracts = (levelContracts * tpProportions[i]) / totalProportion;
+          const orderSizeUsd = orderContracts * price; // для проверки минимума
+          
+          // Проверка на "пыль" - если лимитка меньше $10, пропускаем
+          if (orderSizeUsd < 10) {
+            if (config.logLevel === 'debug') {
+              console.warn(
+                `[Trading] ${position.coin} TP лимитка слишком мала ($${orderSizeUsd.toFixed(2)}), пропускаем`
+              );
+            }
+            continue;
+          }
+          
+          // Размещаем ордер С УКАЗАНИЕМ КОНТРАКТОВ
+          const order = await this.engine.placeLimitOrder(
+            position.coin,
+            side,
+            price,
+            orderSizeUsd,
+            'tp',
+            orderContracts // ✅ Передаём точное количество контрактов
           );
-          continue;
+          
+          if (order) {
+            orders.push(order);
+            totalTpSizeUsd += order.sizeUsd;
+            totalTpContracts += orderContracts;
+          }
         }
+      } else {
+        // FALLBACK: старая логика в USD (если contracts недоступны)
+        const levelSizeUsd = actualPositionSizeUsd * (percent / 100);
         
-        const order = await this.engine.placeLimitOrder(position.coin, side, price, sizeUsd, 'tp');
-        if (order) {
-          orders.push(order);
-          totalTpSize += order.sizeUsd;
+        const count = tpProportions.length;
+        for (let i = 0; i < count; i++) {
+          let sizeUsd = (levelSizeUsd * tpProportions[i]) / totalProportion;
+          
+          // Проверка на "пыль" - если лимитка меньше $10, пропускаем
+          if (sizeUsd < 10) {
+            console.warn(
+              `[Trading] ${position.coin} TP лимитка слишком мала ($${sizeUsd.toFixed(2)}), пропускаем`
+            );
+            continue;
+          }
+          
+          const order = await this.engine.placeLimitOrder(position.coin, side, price, sizeUsd, 'tp');
+          if (order) {
+            orders.push(order);
+            totalTpSizeUsd += order.sizeUsd;
+          }
         }
       }
     }
 
-    // Проверяем остаток "пыли"
-    const dust = actualPositionSize - totalTpSize;
+    // ====================================================================
+    // ПРОВЕРКА ПЫЛИ
+    // ====================================================================
+    let dustUsd = 0;
+    let dustContracts = 0;
     
-    position.tpLimitOrders = orders;
+    if (actualPositionSizeContracts) {
+      // Проверяем пыль в контрактах
+      dustContracts = actualPositionSizeContracts - totalTpContracts;
+      dustUsd = dustContracts * position.entryPrice;
+      
+      position.tpLimitOrders = orders;
 
-    console.log(
-      `[Trading] Размещено ${orders.length} TP лимитных ордеров для ${position.coin} ` +
-      `(размер позиции: $${actualPositionSize.toFixed(2)}, TP объем: $${totalTpSize.toFixed(2)}, пыль: $${dust.toFixed(2)})`
-    );
-    
-    if (dust >= 10) {
-      console.warn(
-        `[Trading] ⚠️ ${position.coin} остаток пыли >= $10: $${dust.toFixed(2)}! Проверьте расчеты!`
+      console.log(
+        `[Trading] Размещено ${orders.length} TP лимитных ордеров для ${position.coin} ` +
+        `(размер позиции: ${actualPositionSizeContracts.toFixed(4)} contracts = $${actualPositionSizeUsd.toFixed(2)}, ` +
+        `TP объем: ${totalTpContracts.toFixed(4)} contracts = $${totalTpSizeUsd.toFixed(2)}, ` +
+        `пыль: ${dustContracts.toFixed(4)} contracts = $${dustUsd.toFixed(2)})`
       );
+      
+      if (dustUsd >= 10) {
+        console.warn(
+          `[Trading] ⚠️ ${position.coin} остаток пыли >= $10: ${dustContracts.toFixed(4)} contracts ($${dustUsd.toFixed(2)})! ` +
+          `Проверьте расчеты!`
+        );
+      } else if (config.logLevel === 'debug' && dustUsd > 0.01) {
+        console.log(
+          `[Trading] ${position.coin} пыль в допустимых пределах: ${dustContracts.toFixed(4)} contracts ($${dustUsd.toFixed(2)})`
+        );
+      }
+    } else {
+      // Старая проверка пыли в USD
+      dustUsd = actualPositionSizeUsd - totalTpSizeUsd;
+      
+      position.tpLimitOrders = orders;
+
+      console.log(
+        `[Trading] Размещено ${orders.length} TP лимитных ордеров для ${position.coin} ` +
+        `(размер позиции: $${actualPositionSizeUsd.toFixed(2)}, TP объем: $${totalTpSizeUsd.toFixed(2)}, пыль: $${dustUsd.toFixed(2)})`
+      );
+      
+      if (dustUsd >= 10) {
+        console.warn(
+          `[Trading] ⚠️ ${position.coin} остаток пыли >= $10: $${dustUsd.toFixed(2)}! Проверьте расчеты!`
+        );
+      }
     }
     
     if (config.logLevel === 'debug' && orders.length) {
@@ -792,7 +895,7 @@ export class BounceTradingModule implements TradingModule {
       
       if (lifetime < config.tradeMinOrderLifetimeMs) {
         // Заявка еще слишком молодая
-        if (config.logLevel === 'debug') {
+      if (config.logLevel === 'debug') {
           console.log(
             `[Trading] ⏳ ${order.coin} заявка слишком молодая (${lifetime}мс / ${config.tradeMinOrderLifetimeMs}мс), ` +
             `жду ещё ${config.tradeMinOrderLifetimeMs - lifetime}мс`
@@ -905,8 +1008,8 @@ export class BounceTradingModule implements TradingModule {
       const msg = `NATR для ${order.coin} недоступен или <= 0, skip entry`;
       fileLogger.error(msg, { coin: order.coin, natr });
       console.warn(`[Trading] ${msg}`);
-      return;
-    }
+        return;
+      }
 
     fileLogger.debug(`${order.coin} NATR=${natr.toFixed(4)}`, { coin: order.coin, natr });
 

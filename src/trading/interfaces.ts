@@ -50,6 +50,7 @@ export interface LimitOrderState {
   coin: string;
   price: number;
   sizeUsd: number;
+  contracts?: number; // Размер в контрактах (лотах) биржи
   side: 'buy' | 'sell';
   purpose: 'entry' | 'tp';
   placedAt: number;
@@ -68,7 +69,9 @@ export interface PositionState {
   side: 'long' | 'short';
   entryPrice: number;
   sizeUsd: number; // Текущий размер позиции (уменьшается при частичном закрытии)
+  sizeContracts?: number; // Размер позиции в контрактах (лотах) биржи
   initialSizeUsd?: number; // Начальный полный размер позиции (для расчета TP)
+  initialSizeContracts?: number; // Начальный размер в контрактах (для расчета TP без пыли)
   openedAt: number;
   /**
    * Сторона исходной плотности (bid/ask), от которой заходили.
@@ -179,13 +182,15 @@ export interface ExecutionEngine {
 
   /**
    * Разместить лимитный ордер на вход или выход.
+   * @param contracts - Опционально: точное количество контрактов (для TP без пыли)
    */
   placeLimitOrder(
     coin: string,
     side: 'buy' | 'sell',
     price: number,
     sizeUsd: number,
-    purpose: 'entry' | 'tp'
+    purpose: 'entry' | 'tp',
+    contracts?: number
   ): Promise<LimitOrderState | null>;
 
   /**

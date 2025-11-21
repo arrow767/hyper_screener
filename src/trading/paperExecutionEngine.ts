@@ -50,7 +50,8 @@ export class PaperExecutionEngine implements ExecutionEngine {
     side: 'buy' | 'sell',
     price: number,
     sizeUsd: number,
-    purpose: 'entry' | 'tp'
+    purpose: 'entry' | 'tp',
+    contracts?: number
   ): Promise<LimitOrderState | null> {
     const orderId = `paper-limit-${Date.now()}-${nextOrderId++}`;
     
@@ -59,6 +60,7 @@ export class PaperExecutionEngine implements ExecutionEngine {
       coin,
       price,
       sizeUsd,
+      contracts, // Сохраняем contracts если передан
       side,
       purpose,
       placedAt: Date.now(),
@@ -68,7 +70,8 @@ export class PaperExecutionEngine implements ExecutionEngine {
 
     console.log(
       `[PaperExecution] Выставили виртуальный лимитный ордер: ${side.toUpperCase()} ${coin} ` +
-        `sizeUsd=${sizeUsd.toFixed(2)} @ $${price.toFixed(4)} (purpose=${purpose}, orderId=${orderId})`
+        `sizeUsd=${sizeUsd.toFixed(2)}${contracts ? ` (${contracts} contracts)` : ''} @ $${price.toFixed(4)} ` +
+        `(purpose=${purpose}, orderId=${orderId})`
     );
 
     return order;
