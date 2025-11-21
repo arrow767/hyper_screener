@@ -98,48 +98,6 @@ export class BinanceExecutionEngine implements ExecutionEngine {
   }
 
   /**
-   * Нормализуем количество под lotSize: шаг и минимум.
-   * Возвращаем 0, если после нормализации меньше minQty.
-   */
-  private async normalizeQuantity(symbol: string, qtyRaw: number): Promise<number> {
-    await this.ensureExchangeInfo();
-    if (!this.exchangeInfoCache) {
-      // fallback: округление до 3 знаков, как раньше
-      return Number(qtyRaw.toFixed(3));
-    }
-
-    const info = this.exchangeInfoCache.symbols?.find((s: any) => s.symbol === symbol);
-    if (!info) {
-      return Number(qtyRaw.toFixed(3));
-    }
-
-    const lotFilter = info.filters?.find((f: any) => f.filterType === 'LOT_SIZE');
-    if (!lotFilter) {
-      return Number(qtyRaw.toFixed(3));
-    }
-
-    const stepSize = parseFloat(lotFilter.stepSize);
-    const minQty = parseFloat(lotFilter.minQty);
-
-    if (!isFinite(stepSize) || stepSize <= 0) {
-      return Number(qtyRaw.toFixed(3));
-    }
-
-    // округляем вниз к ближайшему шагу
-    let qty = Math.floor(qtyRaw / stepSize) * stepSize;
-    qty = Number(qty.toFixed(8));
-
-    if (qty < minQty) {
-      console.warn(
-        `[BinanceExecution] Normalized quantity ${qty} < minQty ${minQty} for ${symbol}, skip order`
-      );
-      return 0;
-    }
-
-    return qty;
-  }
-
-  /**
    * Нормализация цены по правилам биржи (tickSize из PRICE_FILTER).
    * @param symbol - символ инструмента (например, BTCUSDT)
    * @param priceRaw - исходная цена
