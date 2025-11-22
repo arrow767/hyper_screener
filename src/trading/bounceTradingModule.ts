@@ -1585,14 +1585,16 @@ export class BounceTradingModule implements TradingModule {
                   }
                 }
                 
-                // Если TP уже есть, заменяем их на новые с пересчитанным объемом И ценами
+                // Если TP уже есть, заменяем их на новые с пересчитанным объемом
+                // НО цены остаются фиксированными (от первого входа)!
                 const replaceExisting = position.tpLimitOrders && position.tpLimitOrders.length > 0;
-                const forceRecalculatePrices = true; // ВАЖНО: пересчитываем цены от новой средней!
+                const forceRecalculatePrices = false; // ✅ НЕ пересчитываем цены! Они фиксированы от первого входа
                 
                 fileLogger.info(
                   `${position.coin} пересчёт TP после исполнения entry limit: ` +
                   `sizeContracts=${position.sizeContracts?.toFixed(4) || 'N/A'}, ` +
-                  `initialSizeContracts=${position.initialSizeContracts?.toFixed(4) || 'N/A'}`,
+                  `initialSizeContracts=${position.initialSizeContracts?.toFixed(4) || 'N/A'}, ` +
+                  `TP цены остаются фиксированными`,
                   { coin: position.coin, sizeContracts: position.sizeContracts, initialSizeContracts: position.initialSizeContracts }
                 );
                 
