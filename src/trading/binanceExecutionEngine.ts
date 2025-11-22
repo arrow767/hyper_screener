@@ -322,19 +322,34 @@ export class BinanceExecutionEngine implements ExecutionEngine {
     // Для закрытия позиции по маркету отправляем ордер в противоположную сторону
     const side = position.side === 'long' ? 'SELL' : 'BUY';
 
-    // Используем sizeContracts если доступен, иначе рассчитываем из USD
+    // ========================================
+    // КРИТИЧЕСКИ ВАЖНО: Закрываем ТОЧНЫМ количеством контрактов
+    // ========================================
     let quantity: number;
+    let useExactQuantity = false;
+    
     if (position.sizeContracts && position.sizeContracts > 0) {
-      // Уже знаем точное количество контрактов
-      quantity = await this.normalizeQuantity(symbol, position.sizeContracts);
+      // Используем ТОЧНОЕ количество контрактов БЕЗ нормализации
+      // чтобы гарантированно закрыть позицию полностью
+      quantity = position.sizeContracts;
+      useExactQuantity = true;
+      
+      console.log(
+        `[BinanceExecution] ⚠️ Закрываем позицию ТОЧНЫМ количеством: ${quantity} contracts (БЕЗ округления)`
+      );
     } else {
-      // Fallback: рассчитываем из USD
+      // Fallback: рассчитываем из USD и нормализуем
       const price = position.entryPrice;
       const qtyRaw = position.sizeUsd / price;
       quantity = await this.normalizeQuantity(symbol, qtyRaw);
+      
+      console.warn(
+        `[BinanceExecution] ⚠️ sizeContracts недоступен, рассчитываем из USD: ${qtyRaw} → ${quantity} (normalized)`
+      );
     }
     
     if (quantity <= 0) {
+      console.error(`[BinanceExecution] Invalid quantity for closePosition: ${quantity}`);
       return;
     }
 
@@ -373,15 +388,74 @@ export class BinanceExecutionEngine implements ExecutionEngine {
         
         console.log(
           `[BinanceExecution] Получено ${exitTrades.length} реальных trades для exit. ` +
-          `Weighted avg price: $${avgExitPrice.toFixed(4)}`
+          `Weighted avg price: $${avgExitPrice.toFixed(4)}, closed qty: ${totalQty}`
         );
       }
 
       console.log(
-        `[BinanceExecution] closePosition отправлен: ${position.side.toUpperCase()} ${position.coin} sizeUsd=${position.sizeUsd}, reason=${reason}`
+        `[BinanceExecution] closePosition отправлен: ${position.side.toUpperCase()} ${position.coin} ` +
+        `sizeUsd=${position.sizeUsd}, contracts=${position.sizeContracts || 'N/A'}, reason=${reason}`
       );
+      
+      // ========================================
+      // ПРОВЕРКА: Действительно ли позиция закрыта?
+      // ========================================
+      await new Promise(resolve => setTimeout(resolve, 1000)); // Даём время на обновление
+      
+      const remainingPosition = await this.getPositionContracts(position.coin);
+      
+      if (remainingPosition && remainingPosition.contracts > 0) {
+        const remainingUsd = remainingPosition.contracts * remainingPosition.entryPrice;
+        
+        console.warn(
+          `[BinanceExecution] ⚠️ ПОЗИЦИЯ НЕ ПОЛНОСТЬЮ ЗАКРЫТА! ` +
+          `Осталось: ${remainingPosition.contracts} contracts ($${remainingUsd.toFixed(2)})`
+        );
+        
+        // Если осталась пыль - закрываем повторно
+        if (remainingPosition.contracts > 0) {
+          console.log(
+            `[BinanceExecution] 🔄 Закрываем остаток: ${remainingPosition.contracts} contracts`
+          );
+          
+          try {
+            const cleanupResp = (await this.callBinance('POST', '/fapi/v1/order', {
+              symbol,
+              side,
+              type: 'MARKET',
+              quantity: remainingPosition.contracts,
+              reduceOnly: 'true',
+            })) as BinanceOrderResponse;
+            
+            console.log(
+              `[BinanceExecution] ✅ Остаток закрыт успешно (orderId=${cleanupResp.orderId})`
+            );
+          } catch (cleanupError) {
+            console.error(
+              `[BinanceExecution] ❌ Не удалось закрыть остаток:`,
+              cleanupError
+            );
+          }
+        }
+      } else {
+        console.log(`[BinanceExecution] ✅ Позиция ${position.coin} закрыта полностью`);
+      }
+      
     } catch (error) {
       console.error('[BinanceExecution] Failed to close position:', error);
+      
+      // Критическая ошибка - пытаемся получить текущую позицию и залогировать
+      try {
+        const currentPosition = await this.getPositionContracts(position.coin);
+        if (currentPosition) {
+          console.error(
+            `[BinanceExecution] ❌ Текущая позиция после ошибки: ` +
+            `${currentPosition.contracts} contracts ($${currentPosition.sizeUsd.toFixed(2)})`
+          );
+        }
+      } catch (checkError) {
+        console.error(`[BinanceExecution] Не удалось проверить позицию:`, checkError);
+      }
     }
   }
 
