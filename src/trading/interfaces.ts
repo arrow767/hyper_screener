@@ -210,6 +210,12 @@ export interface ExecutionEngine {
   syncOpenPositions?(): Promise<void>;
 
   /**
+   * Получить актуальную позицию в контрактах (лотах) для конкретного символа.
+   * Возвращает { contracts, sizeUsd, entryPrice } или null если позиции нет.
+   */
+  getPositionContracts?(coin: string): Promise<{ contracts: number; sizeUsd: number; entryPrice: number } | null>;
+
+  /**
    * Получить текущие позиции с биржи с реализованным PnL.
    * Используется для периодического мониторинга убытков.
    */

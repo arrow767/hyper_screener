@@ -171,29 +171,91 @@ export class BounceTradingModule implements TradingModule {
         continue;
       }
 
-      // Рассчитываем фактический размер позиции (market + limit filled)
-      const actualSize = (position.marketFilledSizeUsd || 0) + (position.limitFilledSizeUsd || 0);
+      // ========================================
+      // ПОЛУЧАЕМ РЕАЛЬНУЮ ПОЗИЦИЮ ОТ BINANCE В КОНТРАКТАХ
+      // ========================================
+      if (this.engine.getPositionContracts) {
+        try {
+          const realPosition = await this.engine.getPositionContracts(position.coin);
+          if (realPosition && realPosition.contracts > 0) {
+            // Обновляем локальную позицию данными от биржи
+            const oldContracts = position.sizeContracts;
+            position.sizeContracts = realPosition.contracts;
+            position.sizeUsd = realPosition.sizeUsd;
+            position.entryPrice = realPosition.entryPrice;
+            
+            if (!position.initialSizeContracts) {
+              position.initialSizeContracts = realPosition.contracts;
+              position.initialSizeUsd = realPosition.sizeUsd;
+            }
+            
+            if (config.logLevel === 'debug' && oldContracts !== realPosition.contracts) {
+              fileLogger.debug(
+                `${position.coin} reconcile: обновлена позиция от Binance: ` +
+                `${realPosition.contracts.toFixed(4)} contracts (было: ${oldContracts?.toFixed(4) || 'N/A'})`,
+                { coin: position.coin, contracts: realPosition.contracts, oldContracts }
+              );
+            }
+          }
+        } catch (err) {
+          console.error(`[Trading] Ошибка при получении позиции ${position.coin} от Binance:`, err);
+        }
+      }
+
+      // Рассчитываем фактический размер позиции
+      // Используем CONTRACTS если доступны, иначе USD (fallback)
+      let actualSize: number;
+      let actualContracts: number | undefined;
       
-      // Рассчитываем суммарный объём активных TP лимиток (не filled и не cancelled)
-      const tpTotalSize = position.tpLimitOrders
-        .filter((o) => !o.filled && !o.cancelled)
-        .reduce((sum, o) => sum + o.sizeUsd, 0);
+      if (position.sizeContracts && position.sizeContracts > 0) {
+        actualContracts = position.sizeContracts;
+        actualSize = position.sizeUsd;
+      } else {
+        // Fallback: рассчитываем в USD
+        actualSize = (position.marketFilledSizeUsd || 0) + (position.limitFilledSizeUsd || 0);
+      }
+      
+      // Рассчитываем суммарный объём активных TP лимиток
+      // В КОНТРАКТАХ если доступно, иначе в USD
+      let tpTotalSize: number;
+      let tpTotalContracts: number | undefined;
+      
+      if (actualContracts !== undefined) {
+        // Считаем в контрактах
+        tpTotalContracts = position.tpLimitOrders
+          .filter((o) => !o.filled && !o.cancelled)
+          .reduce((sum, o) => sum + (o.contracts || 0), 0);
+        tpTotalSize = tpTotalContracts * position.entryPrice; // для логов
+      } else {
+        // Считаем в USD (fallback)
+        tpTotalSize = position.tpLimitOrders
+          .filter((o) => !o.filled && !o.cancelled)
+          .reduce((sum, o) => sum + o.sizeUsd, 0);
+      }
 
       // Допускаем расхождение до 3% (из-за округления, пыли)
-      const sizeDiff = Math.abs(tpTotalSize - actualSize);
-      const sizePercent = (sizeDiff / actualSize) * 100;
+      const comparisonValue = actualContracts !== undefined ? actualContracts : actualSize;
+      const tpValue = tpTotalContracts !== undefined ? tpTotalContracts : tpTotalSize;
+      
+      const sizeDiff = Math.abs(tpValue - comparisonValue);
+      const sizePercent = comparisonValue > 0 ? (sizeDiff / comparisonValue) * 100 : 0;
 
       if (sizePercent > 3 && config.tradeTpLimitProportions.length > 0) {
         fileLogger.warn(`${position.coin} TP reconciliation: расхождение ${sizePercent.toFixed(1)}%`, {
           coin: position.coin,
           actualSize: actualSize.toFixed(2),
+          actualContracts: actualContracts?.toFixed(4),
           tpTotalSize: tpTotalSize.toFixed(2),
-          sizeDiff: sizeDiff.toFixed(2),
+          tpTotalContracts: tpTotalContracts?.toFixed(4),
+          sizeDiff: sizeDiff.toFixed(4),
         });
 
         console.log(
-          `[Trading] ${position.coin} пересчёт TP лимиток: actualSize=$${actualSize.toFixed(2)}, ` +
-          `tpTotalSize=$${tpTotalSize.toFixed(2)}, расхождение=${sizePercent.toFixed(1)}%`
+          `[Trading] ${position.coin} пересчёт TP лимиток: ` +
+          (actualContracts !== undefined 
+            ? `actualContracts=${actualContracts.toFixed(4)}, tpContracts=${tpTotalContracts?.toFixed(4)}, ` 
+            : `actualSize=$${actualSize.toFixed(2)}, tpTotalSize=$${tpTotalSize.toFixed(2)}, `) +
+          `расхождение=${sizePercent.toFixed(1)}%`
         );
 
         // Пересчитываем TP
@@ -1453,49 +1515,87 @@ export class BounceTradingModule implements TradingModule {
               } @ $${order.price.toFixed(4)}, +$${order.sizeUsd.toFixed(2)} (всего набрано: $${position.limitFilledSizeUsd.toFixed(2)})`
             );
 
+            // ========================================
+            // ПОЛУЧАЕМ РЕАЛЬНУЮ ПОЗИЦИЮ В КОНТРАКТАХ ОТ BINANCE
+            // ========================================
+            if (this.engine.getPositionContracts) {
+              try {
+                const realPosition = await this.engine.getPositionContracts(position.coin);
+                if (realPosition) {
+                  const oldContracts = position.sizeContracts;
+                  position.sizeContracts = realPosition.contracts;
+                  position.sizeUsd = realPosition.sizeUsd;
+                  position.entryPrice = realPosition.entryPrice;
+                  
+                  // Обновляем initialSizeContracts для корректного расчёта TP
+                  position.initialSizeContracts = realPosition.contracts;
+                  position.initialSizeUsd = realPosition.sizeUsd;
+                  
+                  console.log(
+                    `[Trading] ${position.coin} обновлена позиция от Binance: ` +
+                    `${realPosition.contracts.toFixed(4)} contracts (было: ${oldContracts?.toFixed(4) || 'N/A'}), ` +
+                    `$${realPosition.sizeUsd.toFixed(2)}, avgPrice=$${realPosition.entryPrice.toFixed(4)}`
+                  );
+                }
+              } catch (err) {
+                console.error(`[Trading] Ошибка при получении позиции ${position.coin} от Binance:`, err);
+              }
+            }
+
             // После исполнения лимитного ордера пересчитываем TP лимитки
             if (config.tradeTpLimitProportions.length > 0) {
               const natr = this.natrService?.getNatr(position.coin);
               if (natr && natr > 0) {
-                // Рассчитываем новый полный размер позиции
-                const newTotalSize = (position.marketFilledSizeUsd || 0) + (position.limitFilledSizeUsd || 0);
-                position.initialSizeUsd = newTotalSize;
-                
-                // Рассчитываем новую среднюю цену входа (weighted average)
-                let totalQty = 0;
-                let totalCost = 0;
-                
-                // Считаем от market entry
-                if (position.marketFilledSizeUsd && position.marketFilledSizeUsd > 0) {
-                  const marketQty = position.marketFilledSizeUsd / position.entryPrice;
-                  totalQty += marketQty;
-                  totalCost += position.marketFilledSizeUsd;
-                }
-                
-                // Добавляем исполненные entry limits
-                if (position.entryLimitOrders) {
-                  for (const entryOrder of position.entryLimitOrders) {
-                    if (entryOrder.filled) {
-                      const limitQty = entryOrder.sizeUsd / entryOrder.price;
-                      totalQty += limitQty;
-                      totalCost += entryOrder.sizeUsd;
+                // Если позиция НЕ была обновлена от Binance, рассчитываем вручную (fallback)
+                if (!position.sizeContracts) {
+                  // Рассчитываем новый полный размер позиции
+                  const newTotalSize = (position.marketFilledSizeUsd || 0) + (position.limitFilledSizeUsd || 0);
+                  position.initialSizeUsd = newTotalSize;
+                  
+                  // Рассчитываем новую среднюю цену входа (weighted average)
+                  let totalQty = 0;
+                  let totalCost = 0;
+                  
+                  // Считаем от market entry
+                  if (position.marketFilledSizeUsd && position.marketFilledSizeUsd > 0) {
+                    const marketQty = position.marketFilledSizeUsd / position.entryPrice;
+                    totalQty += marketQty;
+                    totalCost += position.marketFilledSizeUsd;
+                  }
+                  
+                  // Добавляем исполненные entry limits
+                  if (position.entryLimitOrders) {
+                    for (const entryOrder of position.entryLimitOrders) {
+                      if (entryOrder.filled) {
+                        const limitQty = entryOrder.sizeUsd / entryOrder.price;
+                        totalQty += limitQty;
+                        totalCost += entryOrder.sizeUsd;
+                      }
                     }
                   }
-                }
-                
-                // Обновляем среднюю цену входа
-                const oldEntryPrice = position.entryPrice;
-                if (totalQty > 0 && totalCost > 0) {
-                  position.entryPrice = totalCost / totalQty;
-                  console.log(
-                    `[Trading] ${position.coin} новая средняя цена входа: $${position.entryPrice.toFixed(4)} ` +
-                    `(было: $${oldEntryPrice.toFixed(4)})`
-                  );
+                  
+                  // Обновляем среднюю цену входа
+                  const oldEntryPrice = position.entryPrice;
+                  if (totalQty > 0 && totalCost > 0) {
+                    position.entryPrice = totalCost / totalQty;
+                    console.log(
+                      `[Trading] ${position.coin} новая средняя цена входа (fallback): $${position.entryPrice.toFixed(4)} ` +
+                      `(было: $${oldEntryPrice.toFixed(4)})`
+                    );
+                  }
                 }
                 
                 // Если TP уже есть, заменяем их на новые с пересчитанным объемом И ценами
                 const replaceExisting = position.tpLimitOrders && position.tpLimitOrders.length > 0;
                 const forceRecalculatePrices = true; // ВАЖНО: пересчитываем цены от новой средней!
+                
+                fileLogger.info(
+                  `${position.coin} пересчёт TP после исполнения entry limit: ` +
+                  `sizeContracts=${position.sizeContracts?.toFixed(4) || 'N/A'}, ` +
+                  `initialSizeContracts=${position.initialSizeContracts?.toFixed(4) || 'N/A'}`,
+                  { coin: position.coin, sizeContracts: position.sizeContracts, initialSizeContracts: position.initialSizeContracts }
+                );
+                
                 await this.placeLimitTpOrders(position, natr, replaceExisting, forceRecalculatePrices);
               }
             }

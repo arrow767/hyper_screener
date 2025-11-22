@@ -574,5 +574,45 @@ export class BinanceExecutionEngine implements ExecutionEngine {
       console.error('[BinanceExecution] Failed to sync open positions:', error);
     }
   }
+
+  /**
+   * Получить актуальную позицию в контрактах (лотах) для конкретного символа.
+   * Возвращает { contracts: number, sizeUsd: number, entryPrice: number } или null если позиции нет.
+   */
+  async getPositionContracts(coin: string): Promise<{ contracts: number; sizeUsd: number; entryPrice: number } | null> {
+    if (!this.isLive()) {
+      return null;
+    }
+
+    try {
+      const symbol = this.toSymbol(coin);
+      const positions = await this.callBinance('GET', '/fapi/v2/positionRisk', { symbol });
+      
+      if (!Array.isArray(positions) || positions.length === 0) {
+        return null;
+      }
+
+      const position = positions[0];
+      const contracts = Math.abs(parseFloat(position.positionAmt));
+      
+      if (contracts === 0) {
+        return null;
+      }
+
+      const entryPrice = parseFloat(position.entryPrice);
+      const sizeUsd = contracts * entryPrice;
+
+      if (config.logLevel === 'debug') {
+        console.log(
+          `[BinanceExecution] Реальная позиция ${coin}: ${contracts} contracts @ $${entryPrice.toFixed(4)} = $${sizeUsd.toFixed(2)}`
+        );
+      }
+
+      return { contracts, sizeUsd, entryPrice };
+    } catch (error) {
+      console.error(`[BinanceExecution] Failed to get position for ${coin}:`, error);
+      return null;
+    }
+  }
 }
 
