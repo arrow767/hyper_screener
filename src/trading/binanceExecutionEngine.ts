@@ -323,28 +323,31 @@ export class BinanceExecutionEngine implements ExecutionEngine {
     const side = position.side === 'long' ? 'SELL' : 'BUY';
 
     // ========================================
-    // КРИТИЧЕСКИ ВАЖНО: Закрываем ТОЧНЫМ количеством контрактов
+    // КРИТИЧЕСКИ ВАЖНО: Закрываем с запасом 110% + reduceOnly
     // ========================================
     let quantity: number;
-    let useExactQuantity = false;
+    const SAFETY_MARGIN = 1.1; // 10% запас для гарантированного закрытия
     
     if (position.sizeContracts && position.sizeContracts > 0) {
-      // Используем ТОЧНОЕ количество контрактов БЕЗ нормализации
-      // чтобы гарантированно закрыть позицию полностью
-      quantity = position.sizeContracts;
-      useExactQuantity = true;
+      // Используем contracts с запасом 110%
+      // reduceOnly гарантирует что Binance не откроет обратную позицию
+      const safeQuantity = position.sizeContracts * SAFETY_MARGIN;
+      quantity = await this.normalizeQuantity(symbol, safeQuantity);
       
       console.log(
-        `[BinanceExecution] ⚠️ Закрываем позицию ТОЧНЫМ количеством: ${quantity} contracts (БЕЗ округления)`
+        `[BinanceExecution] 🎯 Закрываем позицию с запасом 110%: ` +
+        `position=${position.sizeContracts.toFixed(4)}, ` +
+        `order=${quantity} (reduceOnly гарантирует безопасность)`
       );
     } else {
-      // Fallback: рассчитываем из USD и нормализуем
+      // Fallback: рассчитываем из USD с запасом
       const price = position.entryPrice;
-      const qtyRaw = position.sizeUsd / price;
+      const qtyRaw = (position.sizeUsd / price) * SAFETY_MARGIN;
       quantity = await this.normalizeQuantity(symbol, qtyRaw);
       
       console.warn(
-        `[BinanceExecution] ⚠️ sizeContracts недоступен, рассчитываем из USD: ${qtyRaw} → ${quantity} (normalized)`
+        `[BinanceExecution] ⚠️ sizeContracts недоступен, рассчитываем из USD с запасом 110%: ` +
+        `sizeUsd=${position.sizeUsd.toFixed(2)}, order=${quantity}`
       );
     }
     
@@ -363,7 +366,7 @@ export class BinanceExecutionEngine implements ExecutionEngine {
         side,
         type: 'MARKET',
         quantity,
-        reduceOnly: 'true',
+        reduceOnly: 'true', // ✅ Защита: не откроет обратную позицию, закроет максимум размер позиции
       })) as BinanceOrderResponse;
 
       // Получаем реальные trades для точного расчета PnL
@@ -373,6 +376,7 @@ export class BinanceExecutionEngine implements ExecutionEngine {
       // Сохраняем exit trades в позицию для расчета PnL
       position.exitTrades = exitTrades;
 
+      let actualClosedQty = 0;
       if (exitTrades.length > 0) {
         let totalQty = 0;
         let totalValue = 0;
@@ -384,17 +388,18 @@ export class BinanceExecutionEngine implements ExecutionEngine {
           totalValue += tradeQty * tradePrice;
         }
         
+        actualClosedQty = totalQty;
         const avgExitPrice = totalQty > 0 ? totalValue / totalQty : 0;
         
         console.log(
           `[BinanceExecution] Получено ${exitTrades.length} реальных trades для exit. ` +
-          `Weighted avg price: $${avgExitPrice.toFixed(4)}, closed qty: ${totalQty}`
+          `Weighted avg price: $${avgExitPrice.toFixed(4)}, closed qty: ${actualClosedQty}`
         );
       }
 
       console.log(
-        `[BinanceExecution] closePosition отправлен: ${position.side.toUpperCase()} ${position.coin} ` +
-        `sizeUsd=${position.sizeUsd}, contracts=${position.sizeContracts || 'N/A'}, reason=${reason}`
+        `[BinanceExecution] ✅ closePosition отправлен: ${position.side.toUpperCase()} ${position.coin} ` +
+        `requested=${quantity}, filled=${actualClosedQty || 'checking...'}, reason=${reason}`
       );
       
       // ========================================
@@ -407,42 +412,45 @@ export class BinanceExecutionEngine implements ExecutionEngine {
       if (remainingPosition && remainingPosition.contracts > 0) {
         const remainingUsd = remainingPosition.contracts * remainingPosition.entryPrice;
         
-        console.warn(
-          `[BinanceExecution] ⚠️ ПОЗИЦИЯ НЕ ПОЛНОСТЬЮ ЗАКРЫТА! ` +
-          `Осталось: ${remainingPosition.contracts} contracts ($${remainingUsd.toFixed(2)})`
+        console.error(
+          `[BinanceExecution] ❌ КРИТИЧЕСКАЯ ОШИБКА: ПОЗИЦИЯ НЕ ЗАКРЫТА! ` +
+          `Осталось: ${remainingPosition.contracts} contracts ($${remainingUsd.toFixed(2)}). ` +
+          `Это НЕ должно происходить с запасом 110% + reduceOnly!`
         );
         
-        // Если осталась пыль - закрываем повторно
-        if (remainingPosition.contracts > 0) {
-          console.log(
-            `[BinanceExecution] 🔄 Закрываем остаток: ${remainingPosition.contracts} contracts`
-          );
+        // Экстренный cleanup с ещё большим запасом
+        console.log(
+          `[BinanceExecution] 🚨 ЭКСТРЕННОЕ ЗАКРЫТИЕ остатка с запасом 120%`
+        );
+        
+        try {
+          const emergencyQty = await this.normalizeQuantity(symbol, remainingPosition.contracts * 1.2);
           
-          try {
-            const cleanupResp = (await this.callBinance('POST', '/fapi/v1/order', {
-              symbol,
-              side,
-              type: 'MARKET',
-              quantity: remainingPosition.contracts,
-              reduceOnly: 'true',
-            })) as BinanceOrderResponse;
-            
-            console.log(
-              `[BinanceExecution] ✅ Остаток закрыт успешно (orderId=${cleanupResp.orderId})`
-            );
-          } catch (cleanupError) {
-            console.error(
-              `[BinanceExecution] ❌ Не удалось закрыть остаток:`,
-              cleanupError
-            );
-          }
+          const cleanupResp = (await this.callBinance('POST', '/fapi/v1/order', {
+            symbol,
+            side,
+            type: 'MARKET',
+            quantity: emergencyQty,
+            reduceOnly: 'true',
+          })) as BinanceOrderResponse;
+          
+          console.log(
+            `[BinanceExecution] ✅ Экстренный остаток закрыт (orderId=${cleanupResp.orderId})`
+          );
+        } catch (cleanupError) {
+          console.error(
+            `[BinanceExecution] ❌❌❌ НЕ УДАЛОСЬ ЗАКРЫТЬ ОСТАТОК! ТРЕБУЕТСЯ РУЧНОЕ ВМЕШАТЕЛЬСТВО!`,
+            cleanupError
+          );
         }
       } else {
-        console.log(`[BinanceExecution] ✅ Позиция ${position.coin} закрыта полностью`);
+        console.log(
+          `[BinanceExecution] ✅✅✅ Позиция ${position.coin} закрыта ПОЛНОСТЬЮ (запас 110% сработал)`
+        );
       }
       
     } catch (error) {
-      console.error('[BinanceExecution] Failed to close position:', error);
+      console.error('[BinanceExecution] ❌ Failed to close position:', error);
       
       // Критическая ошибка - пытаемся получить текущую позицию и залогировать
       try {
@@ -450,12 +458,16 @@ export class BinanceExecutionEngine implements ExecutionEngine {
         if (currentPosition) {
           console.error(
             `[BinanceExecution] ❌ Текущая позиция после ошибки: ` +
-            `${currentPosition.contracts} contracts ($${currentPosition.sizeUsd.toFixed(2)})`
+            `${currentPosition.contracts} contracts ($${currentPosition.sizeUsd.toFixed(2)}). ` +
+            `ТРЕБУЕТСЯ РУЧНОЕ ЗАКРЫТИЕ!`
           );
         }
       } catch (checkError) {
         console.error(`[BinanceExecution] Не удалось проверить позицию:`, checkError);
       }
+      
+      // Пробрасываем ошибку дальше для обработки выше
+      throw error;
     }
   }
 
