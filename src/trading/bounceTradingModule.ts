@@ -184,6 +184,9 @@ export class BounceTradingModule implements TradingModule {
             position.sizeUsd = realPosition.sizeUsd;
             position.entryPrice = realPosition.entryPrice;
             
+            // ✅ initialSizeContracts устанавливаем ТОЛЬКО если его нет
+            // Он должен хранить ПОЛНЫЙ размер позиции для расчёта TP
+            // НЕ обновляем если позиция уменьшилась (TP исполнились)
             if (!position.initialSizeContracts) {
               position.initialSizeContracts = realPosition.contracts;
               position.initialSizeUsd = realPosition.sizeUsd;
@@ -1527,14 +1530,18 @@ export class BounceTradingModule implements TradingModule {
                   position.sizeUsd = realPosition.sizeUsd;
                   position.entryPrice = realPosition.entryPrice;
                   
-                  // Обновляем initialSizeContracts для корректного расчёта TP
-                  position.initialSizeContracts = realPosition.contracts;
-                  position.initialSizeUsd = realPosition.sizeUsd;
+                  // ✅ Обновляем initialSizeContracts ТОЛЬКО при УВЕЛИЧЕНИИ позиции
+                  // При исполнении TP позиция уменьшается, и мы НЕ должны обновлять initialSizeContracts
+                  if (!position.initialSizeContracts || realPosition.contracts > position.initialSizeContracts) {
+                    position.initialSizeContracts = realPosition.contracts;
+                    position.initialSizeUsd = realPosition.sizeUsd;
+                  }
                   
                   console.log(
                     `[Trading] ${position.coin} обновлена позиция от Binance: ` +
                     `${realPosition.contracts.toFixed(4)} contracts (было: ${oldContracts?.toFixed(4) || 'N/A'}), ` +
-                    `$${realPosition.sizeUsd.toFixed(2)}, avgPrice=$${realPosition.entryPrice.toFixed(4)}`
+                    `$${realPosition.sizeUsd.toFixed(2)}, avgPrice=$${realPosition.entryPrice.toFixed(4)}, ` +
+                    `initialSizeContracts=${position.initialSizeContracts.toFixed(4)}`
                   );
                 }
               } catch (err) {
