@@ -6,6 +6,7 @@ export class TelegramNotifier {
   private bot: Telegraf;
   private lastAlerts = new Map<string, number>();
   private globalRateLimitUntil = 0;
+  private isEnabled = false; // ✅ Флаг доступности Telegram
 
   constructor() {
     this.bot = new Telegraf(config.telegramBotToken);
@@ -14,14 +15,29 @@ export class TelegramNotifier {
   async initialize(): Promise<void> {
     try {
       const me = await this.bot.telegram.getMe();
-      console.log(`[Telegram] Bot initialized: @${me.username}`);
+      console.log(`[Telegram] ✅ Bot initialized: @${me.username}`);
+      this.isEnabled = true; // ✅ Telegram доступен
     } catch (error) {
-      console.error('[Telegram] Failed to initialize bot:', error);
-      throw error;
+      console.error('[Telegram] ❌ Failed to initialize bot:', error);
+      console.warn('[Telegram] ⚠️ Bot will work WITHOUT Telegram notifications');
+      this.isEnabled = false; // ✅ Telegram недоступен, но работаем
+      // НЕ бросаем ошибку! Бот должен работать без Telegram
     }
   }
 
   async sendAlert(order: LargeOrder): Promise<void> {
+    // ✅ Если Telegram недоступен - только логируем в консоль
+    if (!this.isEnabled) {
+      const sideText = order.side === 'bid' ? 'BUY' : 'SELL';
+      console.log(
+        `[Alert] ${sideText} ${order.coin} @ $${order.price.toFixed(4)} | ` +
+          `size=${order.size.toFixed(2)} | value=$${this.formatNumber(order.valueUsd)} | ` +
+          `distance=${order.distancePercent.toFixed(3)}% | ` +
+          `time=${this.formatTimestamp(new Date(order.timestamp))}`
+      );
+      return;
+    }
+
     // Грубый дедуп: одна заявка на coin+side в период cooldown
     const alertKey = `${order.coin}-${order.side}`;
     const now = Date.now();
@@ -123,6 +139,12 @@ export class TelegramNotifier {
    * Отправить произвольное сообщение в Telegram (без дедупликации)
    */
   async sendMessage(message: string): Promise<void> {
+    // ✅ Если Telegram недоступен - только логируем
+    if (!this.isEnabled) {
+      console.log('[Telegram] (offline) Message:', message.substring(0, 100));
+      return;
+    }
+
     try {
       await this.bot.telegram.sendMessage(config.telegramChatId, message, {
         parse_mode: 'HTML',
